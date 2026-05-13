@@ -57,9 +57,14 @@
   - 🔴 red = under 10% left
 - Cross-platform tray icon changes color when usage gets low
 - Menu rows include colored status icons beside each limit
+- Linux GTK menus use real colored text via Pango markup
 - GTK frontend switches to warning/error-style system icons when usage gets low
 - Login/startup installer scripts for Linux, macOS, and Windows
 - No token logging and no extra analytics
+- Pinned dependency files: `requirements.txt` and `pyproject.toml`
+- Provider response shape validation before rendering usage
+- Retry/backoff around transient network failures and 429/5xx responses
+- Unit tests for formatting, validation, and retry behavior
 
 ## Install in 30 seconds
 
@@ -88,7 +93,7 @@ python3 cli_usage_gtk.py
 For the cross-platform pystray frontend:
 
 ```bash
-python3 -m pip install --user pystray Pillow
+python3 -m pip install --user -r requirements.txt
 python3 cli_usage_xplat.py
 ```
 
@@ -102,7 +107,7 @@ chmod +x setup_macos.sh
 Manual run:
 
 ```bash
-python3 -m pip install --user pystray Pillow
+python3 -m pip install --user -r requirements.txt
 python3 cli_usage_xplat.py
 ```
 
@@ -117,7 +122,7 @@ powershell -ExecutionPolicy Bypass -File .\setup_windows.ps1
 Manual run:
 
 ```powershell
-python -m pip install --user pystray Pillow
+python -m pip install --user -r requirements.txt
 python .\cli_usage_xplat.py
 ```
 
@@ -134,7 +139,7 @@ python .\cli_usage_xplat.py
 ### macOS / Windows / generic Linux frontend
 
 ```bash
-python3 -m pip install --user pystray Pillow
+python3 -m pip install --user -r requirements.txt
 ```
 
 ### Linux GTK/AppIndicator frontend
@@ -193,6 +198,14 @@ Remove-Item "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup\cli-usag
 
 Then quit the tray app from the menu or stop the Python process.
 
+## Tests
+
+Run the built-in unit tests:
+
+```bash
+python3 -m unittest discover -s tests
+```
+
 ## Troubleshooting
 
 ### The tray icon does not appear on Linux
@@ -224,6 +237,11 @@ This is expected. The app currently detects Gemini auth status, but does not sho
 - [x] Mock preview image
 - [x] Simple logo/hero art
 - [x] Colored status icons in menu rows and tray icon
+- [x] Pinned dependency file / pyproject metadata
+- [x] Unit tests for core behavior
+- [x] Provider response schema validation
+- [x] Retry/backoff around network calls
+- [x] Linux GTK colored text labels
 - [ ] Native desktop notifications when usage is low
 - [ ] Configurable refresh interval
 - [ ] Package as a macOS app / Windows executable
@@ -236,6 +254,9 @@ This is expected. The app currently detects Gemini auth status, but does not sho
 assets/logo.svg        # README hero logo
 assets/screenshot.svg  # README preview mockup
 cli_usage_core.py      # shared usage/auth detection
+requirements.txt       # pinned runtime deps
+pyproject.toml         # project metadata
+tests/                 # unit tests
 cli_usage_gtk.py       # Linux AppIndicator UI
 cli_usage_xplat.py     # pystray cross-platform UI
 setup*.sh/ps1          # platform startup installers

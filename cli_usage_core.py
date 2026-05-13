@@ -6,12 +6,16 @@ Works on Linux, macOS, and Windows. Used by both the GTK and pystray frontends.
 import json
 import os
 import shutil
+import time
+import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
 
 BAR_WIDTH   = 12
 NET_TIMEOUT = 6
+NET_RETRIES = 3
+NET_BACKOFF = 0.6
 
 
 def _bar(remaining_pct):
@@ -71,10 +75,88 @@ def _limit_row(label, used_pct, reset_when, kind, label_w=14):
     return f"  {_status_icon(remaining)} {label:<{label_w}} {bar}{tail}"
 
 
-def _http_json(url, headers, timeout=NET_TIMEOUT):
+class ProviderResponseError(ValueError):
+    """Raised when a provider returns JSON in an unexpected shape."""
+
+
+def _as_dict(value, name):
+    if not isinstance(value, dict):
+        raise ProviderResponseError(f"{name} response was not an object")
+    return value
+
+
+def _as_optional_dict(value, name):
+    if value in (None, ""):
+        return {}
+    if not isinstance(value, dict):
+        raise ProviderResponseError(f"{name} was not an object")
+    return value
+
+
+def _as_optional_list(value, name):
+    if value in (None, ""):
+        return []
+    if not isinstance(value, list):
+        raise ProviderResponseError(f"{name} was not a list")
+    return value
+
+
+def _as_optional_number(value, name):
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError) as exc:
+        raise ProviderResponseError(f"{name} was not numeric") from exc
+
+
+def _http_json(url, headers, timeout=NET_TIMEOUT, retries=NET_RETRIES, backoff=NET_BACKOFF):
     req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.loads(r.read().decode())
+    last_exc = None
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read().decode())
+        except urllib.error.HTTPError as exc:
+            last_exc = exc
+            retry_after = exc.headers.get("Retry-After") if exc.headers else None
+            should_retry = exc.code == 429 or 500 <= exc.code < 600
+            if not should_retry or attempt == retries - 1:
+                raise
+            delay = float(retry_after) if retry_after and retry_after.isdigit() else backoff * (2 ** attempt)
+            time.sleep(delay)
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            last_exc = exc
+            if attempt == retries - 1:
+                raise
+            time.sleep(backoff * (2 ** attempt))
+    raise last_exc
+
+
+def validate_claude_usage(data):
+    data = _as_dict(data, "Claude usage")
+    for key in ("five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"):
+        window = _as_optional_dict(data.get(key), key)
+        _as_optional_number(window.get("utilization"), f"{key}.utilization")
+    extra = _as_optional_dict(data.get("extra_usage"), "extra_usage")
+    _as_optional_number(extra.get("utilization"), "extra_usage.utilization")
+    return data
+
+
+def validate_codex_usage(data):
+    data = _as_dict(data, "Codex usage")
+    rl = _as_optional_dict(data.get("rate_limit"), "rate_limit")
+    for name in ("primary_window", "secondary_window"):
+        window = _as_optional_dict(rl.get(name), f"rate_limit.{name}")
+        _as_optional_number(window.get("used_percent"), f"rate_limit.{name}.used_percent")
+    for i, extra in enumerate(_as_optional_list(data.get("additional_rate_limits"), "additional_rate_limits")):
+        extra = _as_dict(extra, f"additional_rate_limits[{i}]")
+        erl = _as_optional_dict(extra.get("rate_limit"), f"additional_rate_limits[{i}].rate_limit")
+        for name in ("primary_window", "secondary_window"):
+            window = _as_optional_dict(erl.get(name), f"additional_rate_limits[{i}].rate_limit.{name}")
+            _as_optional_number(window.get("used_percent"), f"additional_rate_limits[{i}].rate_limit.{name}.used_percent")
+    _as_optional_dict(data.get("credits"), "credits")
+    return data
 
 
 # ── Claude Code ──────────────────────────────────────────────────────────────
@@ -115,7 +197,7 @@ def claude_data():
 
     if tok:
         try:
-            u = _http_json(
+            u = validate_claude_usage(_http_json(
                 "https://api.anthropic.com/api/oauth/usage",
                 {
                     "Authorization":     f"Bearer {tok}",
@@ -123,7 +205,7 @@ def claude_data():
                     "anthropic-version": "2023-06-01",
                     "User-Agent":        "claude-code/ai-tray",
                 },
-            )
+            ))
         except Exception as e:
             rows.append((f"  usage unavailable ({type(e).__name__})", False, None))
             return {"installed": True, "rows": rows}
@@ -168,10 +250,10 @@ def codex_data():
         return {"installed": True, "rows": rows}
 
     try:
-        u = _http_json(
+        u = validate_codex_usage(_http_json(
             "https://chatgpt.com/backend-api/codex/usage",
             {"Authorization": f"Bearer {tok}", "User-Agent": "codex_cli_rs/ai-tray"},
-        )
+        ))
     except Exception as e:
         rows.append((f"  usage unavailable ({type(e).__name__})", False, None))
         return {"installed": True, "rows": rows}

@@ -2,6 +2,7 @@
 """cli-usage — GTK/AppIndicator tray frontend (Linux)."""
 
 import gi
+import html
 gi.require_version("Gtk", "3.0")
 try:
     gi.require_version("AyatanaAppIndicator3", "0.1")
@@ -51,6 +52,31 @@ def usage_prefix(pct):
     if state == "healthy":
         return "🟢"
     return "CLI"
+
+
+def markup_for_text(text):
+    """Linux GTK-only colored menu labels using Pango markup."""
+    safe = html.escape(text)
+    stripped = text.strip()
+    if stripped.startswith("🟢"):
+        return f'<span foreground="#22c55e" weight="bold">{safe}</span>'
+    if stripped.startswith("🟡"):
+        return f'<span foreground="#d97706" weight="bold">{safe}</span>'
+    if stripped.startswith("🔴"):
+        return f'<span foreground="#ef4444" weight="bold">{safe}</span>'
+    if stripped.startswith("⚪"):
+        return f'<span foreground="#94a3b8">{safe}</span>'
+    if "usage unavailable" in stripped or "no auth" in stripped or "not installed" in stripped:
+        return f'<span foreground="#94a3b8">{safe}</span>'
+    if stripped.startswith("●"):
+        return f'<span foreground="#38bdf8" weight="bold">{safe}</span>'
+    if stripped.startswith("○"):
+        return f'<span foreground="#64748b">{safe}</span>'
+    if "Account" in stripped or "Auth" in stripped or "Tier" in stripped or "Credits" in stripped:
+        return f'<span foreground="#a78bfa">{safe}</span>'
+    if "cli-usage" in stripped:
+        return f'<span foreground="#7dd3fc" weight="bold">{safe}</span>'
+    return safe
 
 
 class AITray:
@@ -114,11 +140,17 @@ class AITray:
 
     def _s(self, text):
         item = Gtk.MenuItem(label=text)
+        label = item.get_child()
+        if label and hasattr(label, "set_markup"):
+            label.set_markup(markup_for_text(text))
         item.set_sensitive(False)
         self.menu.append(item)
 
     def _action(self, text, fn):
         item = Gtk.MenuItem(label=text)
+        label = item.get_child()
+        if label and hasattr(label, "set_markup"):
+            label.set_markup(f'<span foreground="#7c3aed" weight="bold">{html.escape(text)}</span>')
         item.connect("activate", lambda _: fn())
         self.menu.append(item)
 
