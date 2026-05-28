@@ -325,11 +325,37 @@ def gemini_data():
     return {"installed": True, "rows": rows}
 
 
+def antigravity_data():
+    rows = []
+    if not shutil.which("agy"):
+        return {"installed": False, "rows": [("  not installed", False, None)]}
+
+    email = ""
+    accounts = Path.home() / ".gemini" / "google_accounts.json"
+    if accounts.exists():
+        try:
+            ga = json.loads(accounts.read_text())
+            if isinstance(ga, dict):
+                email = ga.get("active", "") or next(iter(ga.get("accounts", {}) or {}), "") or ""
+        except Exception:
+            pass
+
+    creds = Path.home() / ".gemini" / "oauth_creds.json"
+    if not creds.exists():
+        rows.append(("  no credentials found", False, None))
+        return {"installed": True, "rows": rows}
+
+    rows.append((_kv("Account", email or "logged in"), False, None))
+    rows.append(("  usage unavailable (no public endpoint)", False, None))
+    return {"installed": True, "rows": rows}
+
+
 def fetch_all():
     return {
-        "Claude Code": claude_data(),
-        "Codex CLI":   codex_data(),
-        "Gemini CLI":  gemini_data(),
+        "Claude Code":    claude_data(),
+        "Codex CLI":      codex_data(),
+        "Antigravity CLI": antigravity_data(),
+        "Gemini CLI":     gemini_data(),
     }
 
 
