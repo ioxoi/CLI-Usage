@@ -21,12 +21,7 @@ from datetime import datetime
 from cli_usage_core import fetch_all, worst_remaining_pct
 
 REFRESH_SECONDS = 60
-TOOL_CMDS = {
-    "Claude Code": "claude",
-    "Codex CLI": "codex",
-    "Antigravity CLI": "agy",
-    "Gemini CLI": "gemini",
-}
+TOOL_CMDS = {"Claude Code": "claude", "Codex CLI": "codex", "Gemini CLI": "gemini"}
 
 
 def usage_state(pct):
@@ -127,7 +122,7 @@ class AITray:
         ts = datetime.now().strftime("%H:%M")
         self._s(f"  cli-usage · {ts}")
 
-        for name in ("Claude Code", "Codex CLI", "Antigravity CLI", "Gemini CLI"):
+        for name in ("Claude Code", "Codex CLI", "Gemini CLI"):
             info = data.get(name, {})
             sym  = "●" if info.get("installed") else "○"
             self.menu.append(Gtk.SeparatorMenuItem())

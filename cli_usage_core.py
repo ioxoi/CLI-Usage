@@ -304,35 +304,21 @@ def gemini_data():
     if not shutil.which("gemini"):
         return {"installed": False, "rows": [("  not installed", False, None)]}
 
-    key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-    src = None
-    if key:
-        src = "API key (env)"
-    else:
-        for p in [
-            Path.home() / ".gemini" / "oauth_creds.json",
-            Path.home() / ".config" / "gemini" / "credentials.json",
-            Path.home() / ".config" / "gcloud" / "application_default_credentials.json",
-            Path.home() / "AppData" / "Roaming" / "gcloud" / "application_default_credentials.json",
-            Path.home() / "Library" / "Application Support" / "gcloud" / "application_default_credentials.json",
-        ]:
-            if p.exists():
-                src = p.name
-                break
+    if os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"):
+        rows.append((_kv("Auth", "API key (env)"), False, None))
+        rows.append(("  usage unavailable (no public endpoint)", False, None))
+        return {"installed": True, "rows": rows}
 
-    if not src:
+    creds_path = Path.home() / ".gemini" / "oauth_creds.json"
+    if not creds_path.exists():
         rows.append(("  no credentials found", False, None))
         return {"installed": True, "rows": rows}
 
-    rows.append((_kv("Auth", src), False, None))
-    rows.append(("  usage unavailable (no public endpoint)", False, None))
-    return {"installed": True, "rows": rows}
-
-
-def antigravity_data():
-    rows = []
-    if not shutil.which("agy"):
-        return {"installed": False, "rows": [("  not installed", False, None)]}
+    tok = None
+    try:
+        tok = json.loads(creds_path.read_text()).get("access_token")
+    except Exception:
+        pass
 
     email = ""
     accounts = Path.home() / ".gemini" / "google_accounts.json"
@@ -344,22 +330,49 @@ def antigravity_data():
         except Exception:
             pass
 
-    creds = Path.home() / ".gemini" / "oauth_creds.json"
-    if not creds.exists():
-        rows.append(("  no credentials found", False, None))
+    if not tok:
+        rows.append((_kv("Account", email or "logged in"), False, None))
+        rows.append(("  no access token", False, None))
         return {"installed": True, "rows": rows}
 
+    try:
+        req = urllib.request.Request(
+            "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist",
+            data=b"{}",
+            headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=NET_TIMEOUT) as r:
+            info = json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        rows.append((_kv("Account", email or "logged in"), False, None))
+        if e.code == 401:
+            rows.append(("  token expired — run `gemini` to refresh", False, None))
+        else:
+            rows.append((f"  usage unavailable (HTTP {e.code})", False, None))
+        return {"installed": True, "rows": rows}
+    except Exception as e:
+        rows.append((_kv("Account", email or "logged in"), False, None))
+        rows.append((f"  usage unavailable ({type(e).__name__})", False, None))
+        return {"installed": True, "rows": rows}
+
+    tier = (info.get("currentTier") or {}).get("name") or (info.get("currentTier") or {}).get("id") or ""
+    project = info.get("cloudaicompanionProject") or ""
+
     rows.append((_kv("Account", email or "logged in"), False, None))
-    rows.append(("  usage unavailable (no public endpoint)", False, None))
+    if tier:
+        rows.append((_kv("Tier", tier), False, None))
+    if project:
+        rows.append((_kv("Project", project), False, None))
+    rows.append(("  usage unavailable (Google does not expose per-window quota)", False, None))
     return {"installed": True, "rows": rows}
 
 
 def fetch_all():
     return {
-        "Claude Code":    claude_data(),
-        "Codex CLI":      codex_data(),
-        "Antigravity CLI": antigravity_data(),
-        "Gemini CLI":     gemini_data(),
+        "Claude Code": claude_data(),
+        "Codex CLI":   codex_data(),
+        "Gemini CLI":  gemini_data(),
     }
 
 
