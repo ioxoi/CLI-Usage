@@ -120,6 +120,10 @@ def _http_json(url, headers, timeout=NET_TIMEOUT, retries=NET_RETRIES, backoff=N
             last_exc = exc
             retry_after = exc.headers.get("Retry-After") if exc.headers else None
             should_retry = exc.code == 429 or 500 <= exc.code < 600
+            try:
+                exc.close()
+            except Exception:
+                pass
             if not should_retry or attempt == retries - 1:
                 raise
             delay = float(retry_after) if retry_after and retry_after.isdigit() else backoff * (2 ** attempt)
@@ -130,6 +134,15 @@ def _http_json(url, headers, timeout=NET_TIMEOUT, retries=NET_RETRIES, backoff=N
                 raise
             time.sleep(backoff * (2 ** attempt))
     raise last_exc
+
+
+def _usage_error_rows(exc, relogin_hint):
+    """Menu rows for a failed usage fetch. 401 gets an explicit re-login hint."""
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code == 401:
+            return [(f"  ⚠ re-login required (run: {relogin_hint})", False, None)]
+        return [(f"  usage unavailable (HTTP {exc.code})", False, None)]
+    return [(f"  usage unavailable ({type(exc).__name__})", False, None)]
 
 
 def validate_claude_usage(data):
@@ -206,7 +219,7 @@ def claude_data():
                 },
             ))
         except Exception as e:
-            rows.append((f"  usage unavailable ({type(e).__name__})", False, None))
+            rows.extend(_usage_error_rows(e, "claude /login"))
             return {"installed": True, "rows": rows}
 
         for label, key, kind in [
@@ -258,7 +271,7 @@ def codex_data():
             },
         ))
     except Exception as e:
-        rows.append((f"  usage unavailable ({type(e).__name__})", False, None))
+        rows.extend(_usage_error_rows(e, "codex login"))
         return {"installed": True, "rows": rows}
 
     email = u.get("email", "")

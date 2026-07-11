@@ -67,6 +67,23 @@ class ValidationTests(unittest.TestCase):
             core.validate_codex_usage({"additional_rate_limits": "wrong"})
 
 
+class ErrorRowTests(unittest.TestCase):
+    def test_http_401_maps_to_relogin_row(self):
+        error = urllib.error.HTTPError("url", 401, "unauthorized", {}, io.BytesIO())
+        rows = core._usage_error_rows(error, "codex login")
+        self.assertIn("re-login required", rows[0][0])
+        self.assertIn("codex login", rows[0][0])
+
+    def test_other_http_error_shows_status_code(self):
+        error = urllib.error.HTTPError("url", 503, "down", {}, io.BytesIO())
+        rows = core._usage_error_rows(error, "codex login")
+        self.assertIn("HTTP 503", rows[0][0])
+
+    def test_non_http_error_shows_type_name(self):
+        rows = core._usage_error_rows(TimeoutError(), "codex login")
+        self.assertIn("TimeoutError", rows[0][0])
+
+
 class HttpTests(unittest.TestCase):
     @patch("cli_usage_core.time.sleep", return_value=None)
     @patch("cli_usage_core.urllib.request.urlopen")
