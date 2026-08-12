@@ -21,7 +21,7 @@ from datetime import datetime
 from cli_usage_core import fetch_all, worst_remaining_pct
 
 REFRESH_SECONDS = 60
-TOOL_CMDS = {"Claude Code": "claude", "Codex CLI": "codex", "Gemini CLI": "gemini"}
+TOOL_CMDS = {"Claude Code": "claude", "Codex CLI": "codex"}
 
 
 def usage_state(pct):
@@ -66,6 +66,8 @@ def markup_for_text(text):
         return f'<span foreground="#ef4444" weight="bold">{safe}</span>'
     if stripped.startswith("⚪"):
         return f'<span foreground="#94a3b8">{safe}</span>'
+    if stripped.startswith("⚠"):
+        return f'<span foreground="#f59e0b" weight="bold">{safe}</span>'
     if "usage unavailable" in stripped or "no auth" in stripped or "not installed" in stripped:
         return f'<span foreground="#94a3b8">{safe}</span>'
     if stripped.startswith("●"):
@@ -101,7 +103,12 @@ class AITray:
         GLib.timeout_add_seconds(REFRESH_SECONDS, self.do_refresh)
 
     def do_refresh(self):
-        threading.Thread(target=self._bg_fetch, daemon=True).start()
+        # Never let an exception escape: PyGObject treats a raising timeout
+        # callback as "return False", which permanently removes the 60s timer.
+        try:
+            threading.Thread(target=self._bg_fetch, daemon=True).start()
+        except Exception as e:
+            print(f"cli-usage: refresh failed: {e}", flush=True)
         return True
 
     def _bg_fetch(self):
@@ -122,7 +129,7 @@ class AITray:
         ts = datetime.now().strftime("%H:%M")
         self._s(f"  cli-usage · {ts}")
 
-        for name in ("Claude Code", "Codex CLI", "Gemini CLI"):
+        for name in ("Claude Code", "Codex CLI"):
             info = data.get(name, {})
             sym  = "●" if info.get("installed") else "○"
             self.menu.append(Gtk.SeparatorMenuItem())
