@@ -19,13 +19,34 @@ except ValueError:
 from gi.repository import Gtk, GLib
 
 import cairo
+import os
 import shutil
+import socket
 import subprocess
 import threading
 from datetime import datetime
 from pathlib import Path
 
 from cli_usage_core import fetch_all
+
+
+def sd_notify(state):
+    """Send a message to systemd via $NOTIFY_SOCKET (no-op if unset).
+
+    Used for the Type=notify READY signal and the WatchdogSec heartbeat, so
+    systemd restarts us if the refresh loop ever stops. Dependency-free.
+    """
+    addr = os.environ.get("NOTIFY_SOCKET")
+    if not addr:
+        return
+    if addr.startswith("@"):  # abstract namespace socket
+        addr = "\0" + addr[1:]
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sock:
+            sock.connect(addr)
+            sock.sendall(state.encode())
+    except OSError:
+        pass
 
 REFRESH_SECONDS = 60
 
@@ -261,6 +282,7 @@ class AITray:
         ]
         self.do_refresh()
         GLib.timeout_add_seconds(REFRESH_SECONDS, self.do_refresh)
+        sd_notify("READY=1")
 
     def do_refresh(self):
         # Never let an exception escape: PyGObject treats a raising timeout
@@ -282,6 +304,10 @@ class AITray:
     def _rebuild(self, data):
         for panel in self.panels:
             panel.update(data.get(panel.name, {}))
+        # Heartbeat: reaching here means timer → fetch thread → idle callback
+        # all still work. If the loop ever stalls, the pings stop and systemd's
+        # WatchdogSec restarts us.
+        sd_notify("WATCHDOG=1")
 
     def _do_refresh_click(self):
         self.do_refresh()
