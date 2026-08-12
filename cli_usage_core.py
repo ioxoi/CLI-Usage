@@ -136,6 +136,25 @@ def _http_json(url, headers, timeout=NET_TIMEOUT, retries=NET_RETRIES, backoff=N
     raise last_exc
 
 
+def _codex_window_label(window, fallback="Limit", fallback_kind="week"):
+    """Label + reset-kind for a Codex rate-limit window from its duration.
+
+    Codex no longer guarantees primary_window is the 5h window and secondary
+    the weekly one — on some plans primary_window IS the weekly window. Derive
+    the label from limit_window_seconds instead of the slot position.
+    """
+    secs = window.get("limit_window_seconds")
+    if not secs:
+        return fallback, fallback_kind
+    hours = secs / 3600
+    if hours <= 6:
+        return f"{int(round(hours))}h limit", "5h"
+    days = secs / 86400
+    if abs(days - 7) < 0.5:
+        return "Weekly limit", "week"
+    return f"{int(round(days))}d limit", "week"
+
+
 def _usage_error_rows(exc, relogin_hint):
     """Menu rows for a failed usage fetch. 401 gets an explicit re-login hint."""
     if isinstance(exc, urllib.error.HTTPError):
@@ -150,6 +169,10 @@ def validate_claude_usage(data):
     for key in ("five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet"):
         window = _as_optional_dict(data.get(key), key)
         _as_optional_number(window.get("utilization"), f"{key}.utilization")
+    # Per-model barometers (Fable, etc.) now live in the limits[] array.
+    for i, lim in enumerate(_as_optional_list(data.get("limits"), "limits")):
+        lim = _as_dict(lim, f"limits[{i}]")
+        _as_optional_number(lim.get("percent"), f"limits[{i}].percent")
     extra = _as_optional_dict(data.get("extra_usage"), "extra_usage")
     _as_optional_number(extra.get("utilization"), "extra_usage.utilization")
     return data
@@ -223,15 +246,27 @@ def claude_data():
             return {"installed": True, "rows": rows}
 
         for label, key, kind in [
-            ("5h limit",      "five_hour",        "5h"),
-            ("Weekly limit",  "seven_day",        "week"),
-            ("Weekly Opus",   "seven_day_opus",   "week"),
-            ("Weekly Sonnet", "seven_day_sonnet", "week"),
+            ("5h limit",     "five_hour", "5h"),
+            ("Weekly limit", "seven_day", "week"),
         ]:
             w = u.get(key) or {}
             if w.get("utilization") is not None:
                 rows.append((_limit_row(label, w.get("utilization"),
                                         w.get("resets_at"), kind), False, None))
+
+        # Per-model weekly barometers (Fable, Opus, Sonnet, …). Anthropic moved
+        # these out of the dedicated seven_day_* fields into a generic limits[]
+        # array keyed by scope.model.display_name, so this picks up new models
+        # automatically.
+        for lim in u.get("limits") or []:
+            model = (lim.get("scope") or {}).get("model") or {}
+            name  = model.get("display_name")
+            if not name or lim.get("percent") is None:
+                continue
+            is_session = lim.get("group") == "session"
+            label = f"{name} 5h" if is_session else f"Weekly {name}"
+            rows.append((_limit_row(label, lim["percent"], lim.get("resets_at"),
+                                    "5h" if is_session else "week"), False, None))
 
         eu = u.get("extra_usage") or {}
         if eu.get("is_enabled") and eu.get("utilization") is not None:
@@ -279,14 +314,13 @@ def codex_data():
     rows.append((_kv("Account", email + (f" ({plan})" if plan else "")), False, None))
 
     rl = u.get("rate_limit") or {}
-    pw = rl.get("primary_window") or {}
-    sw = rl.get("secondary_window") or {}
-    if pw:
-        rows.append((_limit_row("5h limit", pw.get("used_percent"),
-                                pw.get("reset_at"), "5h"), False, None))
-    if sw:
-        rows.append((_limit_row("Weekly limit", sw.get("used_percent"),
-                                sw.get("reset_at"), "week"), False, None))
+    for slot, fallback in (("primary_window", ("5h limit", "5h")),
+                           ("secondary_window", ("Weekly limit", "week"))):
+        w = rl.get(slot) or {}
+        if w and w.get("used_percent") is not None:
+            label, kind = _codex_window_label(w, *fallback)
+            rows.append((_limit_row(label, w.get("used_percent"),
+                                    w.get("reset_at"), kind), False, None))
 
     for extra in (u.get("additional_rate_limits") or []):
         name = extra.get("limit_name") or extra.get("metered_feature") or "Extra"
