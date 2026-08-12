@@ -84,7 +84,7 @@ def render_status_icon(tag, text, state):
     set_icon_full. The name encodes the content so GNOME reloads on change.
     """
     ICON_DIR.mkdir(parents=True, exist_ok=True)
-    slug = text.replace(" ", "_").replace("%", "p").replace("?", "q")
+    slug = text.replace(" ", "_").replace("/", "-").replace("%", "p").replace("?", "q")
     name = f"cliusage-{state}-{slug}"
     path = ICON_DIR / f"{name}.png"
     if not path.exists():
@@ -194,23 +194,25 @@ class ProviderIndicator:
         self.indicator.set_menu(self.menu)
 
     def update(self, info):
-        # Headline number drawn into the icon: weekly remaining, or the 5h
-        # window if there is no weekly one, or nothing if there's no data.
+        # Draw the numbers INTO the icon (GNOME renders icons reliably) and
+        # clear the text label. GNOME renders the label only intermittently —
+        # present now, gone after a few hours — which both duplicated the icon
+        # and was the recurring "numbers disappeared" bug.
         summary = info.get("summary") or {}
-        headline = summary.get("weekly")
-        if headline is None:
-            headline = summary.get("5h")
-        if not info.get("installed") or headline is None:
+        five, week = summary.get("5h"), summary.get("weekly")
+        present = [v for v in (five, week) if v is not None]
+        if not info.get("installed") or not present:
             state, text = "unknown", self.tag
+        elif five is not None and week is not None:
+            state = usage_state(min(present))
+            text = f"{self.tag} {int(round(five))}/{int(round(week))}%"
         else:
-            state = usage_state(headline)
-            text = f"{self.tag} {int(round(headline))}"
+            state = usage_state(present[0])
+            text = f"{self.tag} {int(round(present[0]))}%"
         theme_dir, name = render_status_icon(self.tag, text, state)
         self.indicator.set_icon_theme_path(theme_dir)
         self.indicator.set_icon_full(name, self.name)
-        # Also set the text label — harmless where GNOME ignores it, and used
-        # by trays that do render labels.
-        self.indicator.set_label(tray_label(self.tag, info), f"{self.tag} 100/100")
+        self.indicator.set_label("", "")
 
         for c in self.menu.get_children():
             self.menu.remove(c)
