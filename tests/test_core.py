@@ -113,6 +113,27 @@ class ClaudeModelBarometerTests(unittest.TestCase):
         self.assertEqual(sum("Weekly" in r for r in rows), 1)
 
 
+class CodexDetectionTests(unittest.TestCase):
+    def test_installed_via_auth_file_when_not_on_path(self):
+        # Simulates a systemd user service whose PATH lacks the nvm bin dir:
+        # `codex` is not resolvable but ~/.codex/auth.json exists.
+        payload = {"email": "x@y.z", "plan_type": "plus", "rate_limit": {}}
+        with patch("cli_usage_core.shutil.which", return_value=None), \
+             patch("cli_usage_core.Path.exists", return_value=True), \
+             patch("cli_usage_core.Path.read_text",
+                   return_value=json.dumps({"tokens": {"access_token": "t"}})), \
+             patch("cli_usage_core._http_json", return_value=payload):
+            result = core.codex_data()
+        self.assertTrue(result["installed"])
+        self.assertFalse(any("not installed" in r[0] for r in result["rows"]))
+
+    def test_not_installed_when_no_binary_and_no_auth(self):
+        with patch("cli_usage_core.shutil.which", return_value=None), \
+             patch("cli_usage_core.Path.exists", return_value=False):
+            result = core.codex_data()
+        self.assertFalse(result["installed"])
+
+
 class CodexWindowLabelTests(unittest.TestCase):
     def test_weekly_window_by_duration(self):
         label, kind = core._codex_window_label({"limit_window_seconds": 604800})

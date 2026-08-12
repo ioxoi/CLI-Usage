@@ -279,10 +279,14 @@ def claude_data():
 
 def codex_data():
     rows = []
-    if not shutil.which("codex"):
+    auth_file = Path.home() / ".codex" / "auth.json"
+    # `codex` is often installed via nvm, whose bin dir is absent from a
+    # systemd user service's PATH — so shutil.which() alone falsely reports
+    # "not installed". The presence of ~/.codex/auth.json is an equally valid
+    # signal (and it's what the usage fetch actually reads), so accept either.
+    if not shutil.which("codex") and not auth_file.exists():
         return {"installed": False, "rows": [("  not installed", False, None)]}
 
-    auth_file = Path.home() / ".codex" / "auth.json"
     tok = None
     if auth_file.exists():
         try:
