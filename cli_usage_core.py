@@ -136,6 +136,11 @@ def _http_json(url, headers, timeout=NET_TIMEOUT, retries=NET_RETRIES, backoff=N
     raise last_exc
 
 
+def _remaining(used_pct):
+    """Remaining percent from a used percent, or None if unknown."""
+    return None if used_pct is None else 100 - float(used_pct)
+
+
 def _codex_window_label(window, fallback="Limit", fallback_kind="week"):
     """Label + reset-kind for a Codex rate-limit window from its duration.
 
@@ -198,8 +203,9 @@ def validate_codex_usage(data):
 
 def claude_data():
     rows = []
+    summary = {"5h": None, "weekly": None}
     if not shutil.which("claude"):
-        return {"installed": False, "rows": [("  not installed", False, None)]}
+        return {"installed": False, "rows": [("  not installed", False, None)], "summary": summary}
 
     dot = Path.home() / ".claude.json"
     email, billing = "", ""
@@ -243,14 +249,15 @@ def claude_data():
             ))
         except Exception as e:
             rows.extend(_usage_error_rows(e, "claude /login"))
-            return {"installed": True, "rows": rows}
+            return {"installed": True, "rows": rows, "summary": summary}
 
-        for label, key, kind in [
-            ("5h limit",     "five_hour", "5h"),
-            ("Weekly limit", "seven_day", "week"),
+        for label, key, kind, slot in [
+            ("5h limit",     "five_hour", "5h",   "5h"),
+            ("Weekly limit", "seven_day", "week", "weekly"),
         ]:
             w = u.get(key) or {}
             if w.get("utilization") is not None:
+                summary[slot] = _remaining(w.get("utilization"))
                 rows.append((_limit_row(label, w.get("utilization"),
                                         w.get("resets_at"), kind), False, None))
 
@@ -272,20 +279,21 @@ def claude_data():
         if eu.get("is_enabled") and eu.get("utilization") is not None:
             rows.append((_limit_row("Extra usage", eu["utilization"], None, "week"), False, None))
 
-    return {"installed": True, "rows": rows}
+    return {"installed": True, "rows": rows, "summary": summary}
 
 
 # ── Codex CLI ────────────────────────────────────────────────────────────────
 
 def codex_data():
     rows = []
+    summary = {"5h": None, "weekly": None}
     auth_file = Path.home() / ".codex" / "auth.json"
     # `codex` is often installed via nvm, whose bin dir is absent from a
     # systemd user service's PATH — so shutil.which() alone falsely reports
     # "not installed". The presence of ~/.codex/auth.json is an equally valid
     # signal (and it's what the usage fetch actually reads), so accept either.
     if not shutil.which("codex") and not auth_file.exists():
-        return {"installed": False, "rows": [("  not installed", False, None)]}
+        return {"installed": False, "rows": [("  not installed", False, None)], "summary": summary}
 
     tok = None
     if auth_file.exists():
@@ -298,7 +306,7 @@ def codex_data():
 
     if not tok:
         rows.append(("  no auth token", False, None))
-        return {"installed": True, "rows": rows}
+        return {"installed": True, "rows": rows, "summary": summary}
 
     try:
         u = validate_codex_usage(_http_json(
@@ -311,7 +319,7 @@ def codex_data():
         ))
     except Exception as e:
         rows.extend(_usage_error_rows(e, "codex login"))
-        return {"installed": True, "rows": rows}
+        return {"installed": True, "rows": rows, "summary": summary}
 
     email = u.get("email", "")
     plan  = (u.get("plan_type") or "").title()
@@ -323,6 +331,7 @@ def codex_data():
         w = rl.get(slot) or {}
         if w and w.get("used_percent") is not None:
             label, kind = _codex_window_label(w, *fallback)
+            summary["5h" if kind == "5h" else "weekly"] = _remaining(w.get("used_percent"))
             rows.append((_limit_row(label, w.get("used_percent"),
                                     w.get("reset_at"), kind), False, None))
 
@@ -344,7 +353,7 @@ def codex_data():
         bal = cr.get("balance", "")
         rows.append((_kv("Credits", "unlimited" if cr.get("unlimited") else f"${bal}"), False, None))
 
-    return {"installed": True, "rows": rows}
+    return {"installed": True, "rows": rows, "summary": summary}
 
 
 def fetch_all():

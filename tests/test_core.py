@@ -101,6 +101,19 @@ class ClaudeModelBarometerTests(unittest.TestCase):
         })
         self.assertTrue(any("Weekly Fable" in r and "77% left" in r for r in rows))
 
+    def test_summary_reports_5h_and_weekly_remaining(self):
+        creds = json.dumps({"claudeAiOauth": {"accessToken": "tok"}})
+        payload = {
+            "five_hour": {"utilization": 6, "resets_at": None},
+            "seven_day": {"utilization": 29, "resets_at": None},
+        }
+        with patch("cli_usage_core.shutil.which", return_value="/usr/bin/claude"), \
+             patch("cli_usage_core.Path.exists", return_value=True), \
+             patch("cli_usage_core.Path.read_text", return_value=creds), \
+             patch("cli_usage_core._http_json", return_value=payload):
+            summary = core.claude_data()["summary"]
+        self.assertEqual(summary, {"5h": 94, "weekly": 71})
+
     def test_unscoped_limits_do_not_duplicate_rows(self):
         rows = self._rows({
             "seven_day": {"utilization": 29, "resets_at": None},
@@ -132,6 +145,20 @@ class CodexDetectionTests(unittest.TestCase):
              patch("cli_usage_core.Path.exists", return_value=False):
             result = core.codex_data()
         self.assertFalse(result["installed"])
+        self.assertEqual(result["summary"], {"5h": None, "weekly": None})
+
+    def test_summary_maps_weekly_only_plan(self):
+        # Plus plan: primary_window is the weekly window, no 5h.
+        payload = {"email": "x@y.z", "plan_type": "plus", "rate_limit": {
+            "primary_window": {"used_percent": 15, "limit_window_seconds": 604800},
+        }}
+        with patch("cli_usage_core.shutil.which", return_value=None), \
+             patch("cli_usage_core.Path.exists", return_value=True), \
+             patch("cli_usage_core.Path.read_text",
+                   return_value=json.dumps({"tokens": {"access_token": "t"}})), \
+             patch("cli_usage_core._http_json", return_value=payload):
+            summary = core.codex_data()["summary"]
+        self.assertEqual(summary, {"5h": None, "weekly": 85})
 
 
 class CodexWindowLabelTests(unittest.TestCase):
