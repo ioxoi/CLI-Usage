@@ -136,7 +136,13 @@ class ProviderIndicator:
         self.indicator.set_status(AppIndicator3.IndicatorStatus.ACTIVE)
         self.indicator.set_label(f"{tag} …", f"{tag} 100/100")
 
+        # set_menu exports the menu over D-Bus at THIS point, so it must already
+        # be non-empty — handing libayatana an empty menu makes GNOME treat the
+        # icon as having no menu, and clicks do nothing. Seed one item first;
+        # update() then rebuilds in place (which propagates via dbusmenu).
         self.menu = Gtk.Menu()
+        self._s("  …")
+        self.menu.show_all()
         self.indicator.set_menu(self.menu)
 
     def update(self, info):
