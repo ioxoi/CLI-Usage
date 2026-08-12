@@ -18,10 +18,12 @@ except ValueError:
 
 from gi.repository import Gtk, GLib
 
+import cairo
 import shutil
 import subprocess
 import threading
 from datetime import datetime
+from pathlib import Path
 
 from cli_usage_core import fetch_all
 
@@ -64,26 +66,72 @@ def usage_prefix(pct):
     return "⚪"
 
 
-def _fmt(remaining):
-    """A remaining-percent as a short integer string, or an en dash if absent."""
-    return "–" if remaining is None else str(int(round(remaining)))
+# GNOME Shell renders the tray ICON reliably but ignores the AppIndicator text
+# label, so we draw the number INTO the icon instead of setting a label.
+ICON_DIR = Path.home() / ".cache" / "cli-usage-icons"
+STATUS_RGB = {
+    "healthy":  (0.13, 0.77, 0.37),
+    "warning":  (0.85, 0.47, 0.02),
+    "critical": (0.94, 0.27, 0.27),
+    "unknown":  (0.58, 0.64, 0.72),
+}
+
+
+def render_status_icon(tag, text, state):
+    """Render `<tag> <n>` (e.g. "CC 34") as a colored PNG tray icon.
+
+    Returns (theme_dir, icon_name) for AppIndicator.set_icon_theme_path +
+    set_icon_full. The name encodes the content so GNOME reloads on change.
+    """
+    ICON_DIR.mkdir(parents=True, exist_ok=True)
+    slug = text.replace(" ", "_").replace("%", "p").replace("?", "q")
+    name = f"cliusage-{state}-{slug}"
+    path = ICON_DIR / f"{name}.png"
+    if not path.exists():
+        height, font = 44, 30
+        measure = cairo.Context(cairo.ImageSurface(cairo.FORMAT_ARGB32, 8, 8))
+        measure.select_font_face("sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+        measure.set_font_size(font)
+        xb, yb, tw, th, _, _ = measure.text_extents(text)
+        width = int(tw + 14)
+        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
+        cr = cairo.Context(surface)
+        cr.select_font_face("sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
+        cr.set_font_size(font)
+        cr.set_source_rgb(*STATUS_RGB.get(state, STATUS_RGB["unknown"]))
+        cr.move_to(7 - xb, (height - th) / 2 - yb)
+        cr.show_text(text)
+        surface.write_to_png(str(path))
+    return str(ICON_DIR), name
+
+
+def _pct(remaining):
+    """A remaining-percent as a short integer string."""
+    return str(int(round(remaining)))
 
 
 def tray_label(tag, info):
     """Build the compact tray label for one provider.
 
-    Format: `<color> <tag> <5h>/<weekly>`, e.g. "🟢 CC 94/71" or "🟢 CX –/85".
-    Not installed → "⚪ <tag> —".
+    Both windows present → "<color> <tag> <5h>/<weekly>" (e.g. "🟢 CC 94/71").
+    Only one window      → "<color> <tag> <n>%"          (e.g. "🟢 CX 85%").
+    No data / uninstalled → "⚪ <tag>".
+
+    Kept to ASCII digits + one emoji: the GNOME panel label renderer would
+    drop the whole CX label when it contained an en dash for the missing 5h
+    window, showing only the icon.
     """
     if not info.get("installed"):
-        return f"⚪ {tag} —"
+        return f"⚪ {tag}"
     summary = info.get("summary") or {}
     five, week = summary.get("5h"), summary.get("weekly")
     present = [v for v in (five, week) if v is not None]
-    worst = min(present) if present else None
-    if worst is None:
-        return f"⚪ {tag} –/–"
-    return f"{usage_prefix(worst)} {tag} {_fmt(five)}/{_fmt(week)}"
+    if not present:
+        return f"⚪ {tag}"
+    worst = min(present)
+    if five is not None and week is not None:
+        return f"{usage_prefix(worst)} {tag} {_pct(five)}/{_pct(week)}"
+    return f"{usage_prefix(worst)} {tag} {_pct(present[0])}%"
 
 
 def worst_of(info):
@@ -146,8 +194,22 @@ class ProviderIndicator:
         self.indicator.set_menu(self.menu)
 
     def update(self, info):
-        worst = worst_of(info)
-        self.indicator.set_icon_full(usage_icon_name(worst), self.name)
+        # Headline number drawn into the icon: weekly remaining, or the 5h
+        # window if there is no weekly one, or nothing if there's no data.
+        summary = info.get("summary") or {}
+        headline = summary.get("weekly")
+        if headline is None:
+            headline = summary.get("5h")
+        if not info.get("installed") or headline is None:
+            state, text = "unknown", self.tag
+        else:
+            state = usage_state(headline)
+            text = f"{self.tag} {int(round(headline))}"
+        theme_dir, name = render_status_icon(self.tag, text, state)
+        self.indicator.set_icon_theme_path(theme_dir)
+        self.indicator.set_icon_full(name, self.name)
+        # Also set the text label — harmless where GNOME ignores it, and used
+        # by trays that do render labels.
         self.indicator.set_label(tray_label(self.tag, info), f"{self.tag} 100/100")
 
         for c in self.menu.get_children():

@@ -13,9 +13,15 @@ class TrayLabelTests(unittest.TestCase):
         info = {"installed": True, "summary": {"5h": 94, "weekly": 71}}
         self.assertEqual(g.tray_label("CC", info), "🟢 CC 94/71")
 
-    def test_weekly_only_shows_dash_for_missing_5h(self):
+    def test_single_window_shows_clean_percent(self):
+        # Only a weekly window → single "n%", no en dash (which broke the
+        # GNOME panel label renderer).
         info = {"installed": True, "summary": {"5h": None, "weekly": 85}}
-        self.assertEqual(g.tray_label("CX", info), "🟢 CX –/85")
+        self.assertEqual(g.tray_label("CX", info), "🟢 CX 85%")
+
+    def test_label_is_ascii_digits_plus_emoji(self):
+        info = {"installed": True, "summary": {"5h": None, "weekly": 78}}
+        self.assertNotIn("–", g.tray_label("CX", info))
 
     def test_color_follows_worse_of_two_windows(self):
         # 5h healthy but weekly critical → red prefix.
@@ -24,11 +30,11 @@ class TrayLabelTests(unittest.TestCase):
 
     def test_not_installed(self):
         info = {"installed": False, "summary": {"5h": None, "weekly": None}}
-        self.assertEqual(g.tray_label("CX", info), "⚪ CX —")
+        self.assertEqual(g.tray_label("CX", info), "⚪ CX")
 
     def test_installed_but_no_numbers(self):
         info = {"installed": True, "summary": {"5h": None, "weekly": None}}
-        self.assertEqual(g.tray_label("CC", info), "⚪ CC –/–")
+        self.assertEqual(g.tray_label("CC", info), "⚪ CC")
 
     def test_worst_of_ignores_missing(self):
         self.assertEqual(g.worst_of({"summary": {"5h": None, "weekly": 85}}), 85)
