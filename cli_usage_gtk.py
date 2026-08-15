@@ -98,15 +98,18 @@ STATUS_RGB = {
 }
 
 
-def render_status_icon(tag, text, state):
+def render_status_icon(tag, text, state, variant=""):
     """Render `<tag> <n>` (e.g. "CC 34") as a colored PNG tray icon.
 
     Returns (theme_dir, icon_name) for AppIndicator.set_icon_theme_path +
-    set_icon_full. The name encodes the content so GNOME reloads on change.
+    set_icon_full. `variant` is appended to the name so the caller can force a
+    distinct icon name every cycle: GNOME drops a tray item whose icon name
+    never changes (a provider with a static value), so we alternate the name to
+    keep re-asserting the icon and stop the "OpenAI disappeared" drop.
     """
     ICON_DIR.mkdir(parents=True, exist_ok=True)
     slug = text.replace(" ", "_").replace("/", "-").replace("%", "p").replace("?", "q")
-    name = f"cliusage-{state}-{slug}"
+    name = f"cliusage-{state}-{slug}{variant}"
     path = ICON_DIR / f"{name}.png"
     if not path.exists():
         height, font = 44, 30
@@ -196,6 +199,7 @@ class ProviderIndicator:
         self.cmd = cmd
         self.on_refresh = on_refresh
         self.on_quit = on_quit
+        self._tick = 0
 
         self.indicator = AppIndicator3.Indicator.new(
             f"cli-usage-{tag.lower()}",
@@ -230,7 +234,11 @@ class ProviderIndicator:
         else:
             state = usage_state(present[0])
             text = f"{self.tag} {int(round(present[0]))}%"
-        theme_dir, name = render_status_icon(self.tag, text, state)
+        # Alternate the icon name every cycle (…-a / …-b) so GNOME always sees a
+        # fresh icon and keeps rendering the item even when its value is static.
+        self._tick += 1
+        variant = "-a" if self._tick % 2 else "-b"
+        theme_dir, name = render_status_icon(self.tag, text, state, variant)
         self.indicator.set_icon_theme_path(theme_dir)
         self.indicator.set_icon_full(name, self.name)
         self.indicator.set_label("", "")
