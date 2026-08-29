@@ -98,15 +98,18 @@ STATUS_RGB = {
 }
 
 
-def render_status_icon(tag, text, state):
+def render_status_icon(tag, text, state, variant=""):
     """Render `<tag> <n>` (e.g. "CC 34") as a colored PNG tray icon.
 
     Returns (theme_dir, icon_name) for AppIndicator.set_icon_theme_path +
-    set_icon_full. The name encodes the content so GNOME reloads on change.
+    set_icon_full. `variant` is appended to the name so the caller can force a
+    distinct icon name every cycle: GNOME drops a tray item whose icon name
+    never changes (a provider with a static value), so we alternate the name to
+    keep re-asserting the icon and stop the "OpenAI disappeared" drop.
     """
     ICON_DIR.mkdir(parents=True, exist_ok=True)
     slug = text.replace(" ", "_").replace("/", "-").replace("%", "p").replace("?", "q")
-    name = f"cliusage-{state}-{slug}"
+    name = f"cliusage-{state}-{slug}{variant}"
     path = ICON_DIR / f"{name}.png"
     if not path.exists():
         height, font = 44, 30
@@ -196,6 +199,7 @@ class ProviderIndicator:
         self.cmd = cmd
         self.on_refresh = on_refresh
         self.on_quit = on_quit
+        self._tick = 0
 
         self.indicator = AppIndicator3.Indicator.new(
             f"cli-usage-{tag.lower()}",
@@ -230,7 +234,11 @@ class ProviderIndicator:
         else:
             state = usage_state(present[0])
             text = f"{self.tag} {int(round(present[0]))}%"
-        theme_dir, name = render_status_icon(self.tag, text, state)
+        # Alternate the icon name every cycle (…-a / …-b) so GNOME always sees a
+        # fresh icon and keeps rendering the item even when its value is static.
+        self._tick += 1
+        variant = "-a" if self._tick % 2 else "-b"
+        theme_dir, name = render_status_icon(self.tag, text, state, variant)
         self.indicator.set_icon_theme_path(theme_dir)
         self.indicator.set_icon_full(name, self.name)
         self.indicator.set_label("", "")
@@ -280,11 +288,17 @@ class AITray:
             ProviderIndicator(name, tag, cmd, self._do_refresh_click, Gtk.main_quit)
             for (name, tag, cmd) in PROVIDERS
         ]
+        sd_notify("READY=1")
         self.do_refresh()
         GLib.timeout_add_seconds(REFRESH_SECONDS, self.do_refresh)
-        sd_notify("READY=1")
 
     def do_refresh(self):
+        # Watchdog heartbeat lives HERE — on the 60s main-loop timer — not after
+        # the fetch. A slow/hung network call happens on the background thread
+        # and must NOT trip the watchdog; only a frozen main loop (this timer
+        # stops firing) should. Pinging after the fetch instead made a stalled
+        # API kill a perfectly healthy app.
+        sd_notify("WATCHDOG=1")
         # Never let an exception escape: PyGObject treats a raising timeout
         # callback as "return False", which permanently removes the 60s timer.
         try:
@@ -304,10 +318,6 @@ class AITray:
     def _rebuild(self, data):
         for panel in self.panels:
             panel.update(data.get(panel.name, {}))
-        # Heartbeat: reaching here means timer → fetch thread → idle callback
-        # all still work. If the loop ever stalls, the pings stop and systemd's
-        # WatchdogSec restarts us.
-        sd_notify("WATCHDOG=1")
 
     def _do_refresh_click(self):
         self.do_refresh()
