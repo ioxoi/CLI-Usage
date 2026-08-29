@@ -288,11 +288,17 @@ class AITray:
             ProviderIndicator(name, tag, cmd, self._do_refresh_click, Gtk.main_quit)
             for (name, tag, cmd) in PROVIDERS
         ]
+        sd_notify("READY=1")
         self.do_refresh()
         GLib.timeout_add_seconds(REFRESH_SECONDS, self.do_refresh)
-        sd_notify("READY=1")
 
     def do_refresh(self):
+        # Watchdog heartbeat lives HERE — on the 60s main-loop timer — not after
+        # the fetch. A slow/hung network call happens on the background thread
+        # and must NOT trip the watchdog; only a frozen main loop (this timer
+        # stops firing) should. Pinging after the fetch instead made a stalled
+        # API kill a perfectly healthy app.
+        sd_notify("WATCHDOG=1")
         # Never let an exception escape: PyGObject treats a raising timeout
         # callback as "return False", which permanently removes the 60s timer.
         try:
@@ -312,10 +318,6 @@ class AITray:
     def _rebuild(self, data):
         for panel in self.panels:
             panel.update(data.get(panel.name, {}))
-        # Heartbeat: reaching here means timer → fetch thread → idle callback
-        # all still work. If the loop ever stalls, the pings stop and systemd's
-        # WatchdogSec restarts us.
-        sd_notify("WATCHDOG=1")
 
     def _do_refresh_click(self):
         self.do_refresh()

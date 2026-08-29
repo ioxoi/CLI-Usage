@@ -12,7 +12,7 @@ After=graphical-session.target
 # a plain Restart= cannot catch, because the process stays alive when hung.
 Type=notify
 NotifyAccess=main
-WatchdogSec=180
+WatchdogSec=300
 ExecStart=/usr/bin/python3 /home/homan/workspace/CLI-Usage/cli_usage_gtk.py
 # Restart on crash, X11 "Broken pipe" (nonzero exit), AND watchdog timeout;
 # but NOT after a clean Quit from the tray menu (exit 0).
