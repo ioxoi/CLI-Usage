@@ -2,8 +2,12 @@
 """cli-usage — GTK/AppIndicator tray frontend (Linux).
 
 One tray indicator per provider (Claude Code, Codex CLI), so both usages are
-visible at a glance. Each label is `<color> <tag> <5h>/<weekly>` — the two
-windows always in the same order, so the number never "switches" on you.
+visible at a glance. The at-a-glance text (`CC 86/32%` = 5h / weekly, always
+in that order) is rendered INTO the icon image and colour-coded, because GNOME
+draws the AppIndicator icon reliably but its text label only intermittently.
+Full detail (every window, per-model limits, credits) is in each icon's menu.
+
+Runs as a systemd user service with a watchdog; Quit stops the service.
 """
 
 import gi
@@ -59,6 +63,10 @@ PROVIDERS = [(name, tag, cmd) for name, (tag, cmd) in CORE_PROVIDERS.items()]
 # GNOME Shell renders the tray ICON reliably but ignores the AppIndicator text
 # label, so we draw the number INTO the icon instead of setting a label.
 ICON_DIR = Path.home() / ".cache" / "cli-usage-icons"
+# Every distinct value renders a new PNG (x2 for the a/b variant), so without a
+# cap the cache grows forever (~2.5k files / 18 MB in three weeks). Keep the
+# most recently used files only; anything evicted is simply re-rendered.
+ICON_CACHE_MAX = 200
 STATUS_RGB = {
     "healthy":  (0.13, 0.77, 0.37),
     "warning":  (0.85, 0.47, 0.02),
@@ -95,7 +103,30 @@ def render_status_icon(tag, text, state, variant=""):
         cr.move_to(7 - xb, (height - th) / 2 - yb)
         cr.show_text(text)
         surface.write_to_png(str(path))
+        _prune_icon_cache(protect=path)
+    else:
+        path.touch()  # mark as recently used so pruning keeps live values
     return str(ICON_DIR), name
+
+
+def _prune_icon_cache(keep=None, protect=None):
+    """Delete the least-recently-used cached icons beyond ICON_CACHE_MAX.
+
+    `protect` (the icon just rendered) is never evicted, even if mtime
+    granularity makes it look as old as the files being pruned.
+    """
+    keep = ICON_CACHE_MAX if keep is None else keep
+    try:
+        files = sorted((p for p in ICON_DIR.glob("cliusage-*.png") if p != protect),
+                       key=lambda p: p.stat().st_mtime)
+        budget = keep - (1 if protect else 0)
+        for old in files[:-budget] if budget > 0 else files:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
 
 
 def markup_for_text(text):

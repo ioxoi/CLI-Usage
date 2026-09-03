@@ -38,6 +38,23 @@ class RenderStatusIconTests(unittest.TestCase):
             self.assertTrue((Path(tmp) / f"{a}.png").exists())
             self.assertTrue((Path(tmp) / f"{b}.png").exists())
 
+    def test_cache_is_bounded_and_just_rendered_icon_survives(self):
+        # Every distinct value writes a PNG; unbounded this reached 2.5k files.
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch.object(g, "ICON_DIR", Path(tmp)), patch.object(g, "ICON_CACHE_MAX", 5):
+            import os
+            for i in range(9):
+                _, n = g.render_status_icon("CC", f"CC {i}%", "healthy")
+                # The icon we just rendered must always exist right after the
+                # call — pruning may never evict it (even with coarse mtimes).
+                self.assertTrue((Path(tmp) / f"{n}.png").exists(), f"just-rendered {n} was pruned")
+                # give each file a distinct, increasing mtime for deterministic LRU
+                os.utime(Path(tmp) / f"{n}.png", (1_000_000 + i, 1_000_000 + i))
+            remaining = sorted(p.name for p in Path(tmp).glob("*.png"))
+            self.assertLessEqual(len(remaining), 5)
+            self.assertIn("cliusage-healthy-CC_8p.png", remaining)   # newest kept
+            self.assertNotIn("cliusage-healthy-CC_0p.png", remaining)  # oldest evicted
+
     def test_icon_name_is_filesystem_safe(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(g, "ICON_DIR", Path(tmp)):
             _, name = g.render_status_icon("CC", "CC 1/2%", "critical")
