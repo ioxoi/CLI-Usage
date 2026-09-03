@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import tempfile
 import time
 import urllib.error
@@ -380,8 +381,12 @@ def refresh_claude_token(creds_file):
 
     try:
         _merge_write_json(creds_file, apply)
-    except Exception:
-        pass  # the token still works for this cycle
+    except Exception as exc:
+        # The server already rotated the refresh token; if we can't save it the
+        # copy on disk is now dead and the next refresh WILL fail. Say so loudly
+        # (this lands in the systemd journal) rather than fail silently later.
+        print(f"cli-usage: refreshed Claude token but could not write {creds_file}: {exc}",
+              file=sys.stderr, flush=True)
     return access
 
 
@@ -512,8 +517,11 @@ def refresh_codex_token(auth_file):
 
     try:
         _merge_write_json(auth_file, apply)
-    except Exception:
-        pass  # even if persisting fails, the token works for this cycle
+    except Exception as exc:
+        # See refresh_claude_token: a rotated-but-unsaved refresh token strands
+        # the on-disk copy, so this must be visible in the journal.
+        print(f"cli-usage: refreshed Codex token but could not write {auth_file}: {exc}",
+              file=sys.stderr, flush=True)
     return access
 
 

@@ -433,6 +433,32 @@ class ConcurrentCredentialWriteTests(unittest.TestCase):
             self.assertEqual(o["subscriptionType"], "team")
 
 
+class PersistFailureTests(unittest.TestCase):
+    """If the rotated token can't be saved, the on-disk copy is now dead. We must
+    still return the working token for this cycle AND report it loudly."""
+
+    def test_codex_persist_failure_is_reported_not_silent(self):
+        auth = json.dumps({"tokens": {"access_token": "old", "refresh_token": "rt"}})
+        with patch("cli_usage_core.Path.read_text", return_value=auth), \
+             patch("cli_usage_core._http_json", return_value={"access_token": "new", "refresh_token": "rt2"}), \
+             patch("cli_usage_core._atomic_write_json", side_effect=OSError("disk full")), \
+             patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(core.refresh_codex_token(core.Path("/x/auth.json")), "new")
+        self.assertIn("could not write", err.getvalue())
+        self.assertIn("disk full", err.getvalue())
+
+    def test_claude_persist_failure_is_reported_not_silent(self):
+        creds = json.dumps({"claudeAiOauth": {"accessToken": "old", "refreshToken": "rt"}})
+        core._claude_ua_cache = "claude-code/9.9.9"
+        with patch("cli_usage_core.Path.read_text", return_value=creds), \
+             patch("cli_usage_core._http_json", return_value={"access_token": "new"}), \
+             patch("cli_usage_core._atomic_write_json", side_effect=PermissionError("read-only")), \
+             patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(core.refresh_claude_token(core.Path("/x/.credentials.json")), "new")
+        self.assertIn("could not write", err.getvalue())
+        core._claude_ua_cache = None
+
+
 class CodexSubLimitLabelTests(unittest.TestCase):
     def test_sub_limit_windows_labeled_by_duration_not_slot(self):
         # primary_window here is a WEEKLY window (7d) — must not be labeled "5h".
