@@ -344,22 +344,33 @@ class ClaudeRefreshTests(unittest.TestCase):
         self.assertEqual(saved["refreshToken"], "rt2")   # rotated RT persisted
         self.assertIn("expiresAt", saved)
 
-    def test_refresh_sends_real_user_agent(self):
-        # Anthropic's token endpoint is behind a Cloudflare integrity check that
-        # rejects a bare urllib User-Agent with "403 error code: 1010".
+    def test_refresh_sends_real_claude_code_version_user_agent(self):
+        # Anthropic's token endpoint routes on User-Agent: only a real current
+        # "claude-code/<version>" reaches the refresh handler; a made-up name or
+        # an old version gets 404 not_found, and a bare urllib UA gets a
+        # Cloudflare "403 error code: 1010". So we report the installed version.
         seen = {}
 
         def fake_http(url, headers, **kw):
             seen.update(headers)
             return {"access_token": "new"}
 
+        core._claude_ua_cache = None
         with patch("cli_usage_core.Path.read_text", return_value=self.CREDS), \
              patch("cli_usage_core._atomic_write_json"), \
-             patch("cli_usage_core._http_json", side_effect=fake_http):
+             patch("cli_usage_core._http_json", side_effect=fake_http), \
+             patch("subprocess.run") as run:
+            run.return_value.stdout = "9.8.7 (Claude Code)\n"
             self.assertEqual(core.refresh_claude_token(core.Path("/x")), "new")
-        self.assertNotIn(seen.get("User-Agent", ""), ("", "Python-urllib"))
-        self.assertTrue(seen["User-Agent"].startswith("claude-code/"))
+        self.assertEqual(seen["User-Agent"], "claude-code/9.8.7")
         self.assertEqual(seen["Accept"], "application/json")
+        core._claude_ua_cache = None
+
+    def test_user_agent_falls_back_when_claude_binary_unavailable(self):
+        core._claude_ua_cache = None
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            self.assertEqual(core.claude_user_agent(), f"claude-code/{core.CLAUDE_FALLBACK_VERSION}")
+        core._claude_ua_cache = None
 
     def test_401_when_refresh_fails_shows_relogin(self):
         def fake_http(url, headers, **kw):

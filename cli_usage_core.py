@@ -5,6 +5,7 @@ Works on Linux, macOS, and Windows. Used by both the GTK and pystray frontends.
 
 import json
 import os
+import re
 import shutil
 import tempfile
 import time
@@ -23,6 +24,8 @@ CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 CLAUDE_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
 # Public OAuth client id of Claude Code, used the same way for its token.
 CLAUDE_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+# Used in the token-endpoint User-Agent only if `claude --version` is unavailable.
+CLAUDE_FALLBACK_VERSION = "2.1.259"
 
 # Provider registry shared by both frontends: display name -> (tray tag, CLI
 # command). Order here is the display order.
@@ -319,6 +322,34 @@ def validate_codex_usage(data):
 
 # ── Claude Code ──────────────────────────────────────────────────────────────
 
+_claude_ua_cache = None
+
+
+def claude_user_agent():
+    """User-Agent for Anthropic's OAuth token endpoint.
+
+    That endpoint routes on the User-Agent: only a string matching a *real*
+    current Claude Code build ("claude-code/<version>") reaches the refresh
+    handler — anything else (a made-up name, an old version) is answered with
+    404 not_found. So we report the version of the installed `claude` binary.
+    Cached per process; falls back to a recent known version if `claude` can't
+    be queried.
+    """
+    global _claude_ua_cache
+    if _claude_ua_cache:
+        return _claude_ua_cache
+    version = None
+    try:
+        import subprocess
+        out = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=5).stdout
+        m = re.search(r"\b(\d+\.\d+\.\d+)\b", out)
+        version = m.group(1) if m else None
+    except Exception:
+        version = None
+    _claude_ua_cache = f"claude-code/{version or CLAUDE_FALLBACK_VERSION}"
+    return _claude_ua_cache
+
+
 def refresh_claude_token(creds_file):
     """Refresh an expired Claude Code access token from its stored refresh
     token and persist the result back to .credentials.json. Returns the new
@@ -334,7 +365,7 @@ def refresh_claude_token(creds_file):
     if not rt:
         return None
     d = _refresh_oauth(CLAUDE_TOKEN_URL, CLAUDE_OAUTH_CLIENT_ID, rt,
-                       user_agent="claude-code/ai-tray")
+                       user_agent=claude_user_agent())
     if not d:
         return None
     access = d["access_token"]
