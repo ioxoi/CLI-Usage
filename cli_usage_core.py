@@ -19,6 +19,14 @@ CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
 # refresh an expired access token from the stored refresh token, like the CLI.
 CODEX_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 
+CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+CLAUDE_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
+# Public OAuth client id of Claude Code, used the same way for its token.
+CLAUDE_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+
+# Short tray tags per provider (shared by both frontends).
+PROVIDER_TAGS = {"Claude Code": "CC", "Codex CLI": "CX"}
+
 BAR_WIDTH   = 12
 NET_TIMEOUT = 6
 NET_RETRIES = 3
@@ -144,9 +152,73 @@ def _http_json(url, headers, timeout=NET_TIMEOUT, retries=NET_RETRIES, backoff=N
     raise last_exc
 
 
+def _atomic_write_json(path, obj):
+    """Write JSON to `path` atomically, keeping 0600 perms (it holds tokens)."""
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(obj, f, indent=2)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _refresh_oauth(token_url, client_id, refresh_token, scope=None, user_agent="cli-usage"):
+    """POST a refresh_token grant; return the token response dict or None.
+
+    retries=1 on purpose: providers rotate the refresh token, so re-POSTing a
+    refresh could burn a second one. A realistic User-Agent is required:
+    Anthropic's token endpoint sits behind a Cloudflare integrity check that
+    answers a bare urllib UA with "403 error code: 1010" instead of OAuth JSON.
+    """
+    try:
+        payload = {
+            "client_id": client_id,
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+        }
+        if scope:
+            payload["scope"] = scope
+        body = json.dumps(payload).encode()
+        headers = {"Content-Type": "application/json", "Accept": "application/json",
+                   "User-Agent": user_agent}
+        d = _http_json(token_url, headers, data=body, retries=1)
+    except Exception:
+        return None
+    return d if isinstance(d, dict) and d.get("access_token") else None
+
+
 def _remaining(used_pct):
     """Remaining percent from a used percent, or None if unknown."""
     return None if used_pct is None else 100 - float(used_pct)
+
+
+def summary_worst(info):
+    """Lowest remaining % across a provider's 5h/weekly windows, or None."""
+    vals = [v for v in (info.get("summary") or {}).values() if v is not None]
+    return min(vals) if vals else None
+
+
+def summary_badge(tag, info):
+    """Compact at-a-glance text for a provider, shared by both frontends.
+
+    Both windows → "CC 86/32%" (5h/weekly, always that order);
+    one window   → "CX 77%";
+    no data / not installed → just the tag.
+    """
+    summary = info.get("summary") or {}
+    five, week = summary.get("5h"), summary.get("weekly")
+    present = [v for v in (five, week) if v is not None]
+    if not info.get("installed") or not present:
+        return tag
+    if five is not None and week is not None:
+        return f"{tag} {int(round(five))}/{int(round(week))}%"
+    return f"{tag} {int(round(present[0]))}%"
 
 
 def _codex_window_label(window, fallback="Limit", fallback_kind="week"):
@@ -209,6 +281,58 @@ def validate_codex_usage(data):
 
 # ── Claude Code ──────────────────────────────────────────────────────────────
 
+def refresh_claude_token(creds_file):
+    """Refresh an expired Claude Code access token from its stored refresh
+    token and persist the result back to .credentials.json. Returns the new
+    access token, or None if unavailable/failed. Mirrors refresh_codex_token so
+    a ~expired token self-heals instead of showing "re-login required".
+    """
+    try:
+        c = json.loads(creds_file.read_text())
+    except Exception:
+        return None
+    o = c.get("claudeAiOauth") or {}
+    rt = o.get("refreshToken")
+    if not rt:
+        return None
+    d = _refresh_oauth(CLAUDE_TOKEN_URL, CLAUDE_OAUTH_CLIENT_ID, rt,
+                       user_agent="claude-code/ai-tray")
+    if not d:
+        return None
+    access = d["access_token"]
+    o["accessToken"] = access
+    if d.get("refresh_token"):          # rotated — persist the new one
+        o["refreshToken"] = d["refresh_token"]
+    if d.get("expires_in"):
+        o["expiresAt"] = int((time.time() + float(d["expires_in"])) * 1000)
+    c["claudeAiOauth"] = o
+    try:
+        _atomic_write_json(creds_file, c)
+    except Exception:
+        pass  # the token still works for this cycle
+    return access
+
+
+def _claude_usage(tok, creds_file):
+    """Fetch Claude usage; on a 401 (expired token) refresh once and retry."""
+    headers = {
+        "Authorization":     f"Bearer {tok}",
+        "anthropic-beta":    "oauth-2025-04-20",
+        "anthropic-version": "2023-06-01",
+        "User-Agent":        "claude-code/ai-tray",
+    }
+    try:
+        return validate_claude_usage(_http_json(CLAUDE_USAGE_URL, headers))
+    except urllib.error.HTTPError as e:
+        if e.code != 401:
+            raise
+        new = refresh_claude_token(creds_file)
+        if not new:
+            raise
+        headers["Authorization"] = f"Bearer {new}"
+        return validate_claude_usage(_http_json(CLAUDE_USAGE_URL, headers))
+
+
 def claude_data():
     rows = []
     summary = {"5h": None, "weekly": None}
@@ -246,15 +370,7 @@ def claude_data():
 
     if tok:
         try:
-            u = validate_claude_usage(_http_json(
-                "https://api.anthropic.com/api/oauth/usage",
-                {
-                    "Authorization":     f"Bearer {tok}",
-                    "anthropic-beta":    "oauth-2025-04-20",
-                    "anthropic-version": "2023-06-01",
-                    "User-Agent":        "claude-code/ai-tray",
-                },
-            ))
+            u = _claude_usage(tok, creds)
         except Exception as e:
             rows.extend(_usage_error_rows(e, "claude /login"))
             return {"installed": True, "rows": rows, "summary": summary}
@@ -292,22 +408,6 @@ def claude_data():
 
 # ── Codex CLI ────────────────────────────────────────────────────────────────
 
-def _atomic_write_json(path, obj):
-    """Write JSON to `path` atomically, keeping 0600 perms (it holds tokens)."""
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(obj, f, indent=2)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-
-
 def refresh_codex_token(auth_file):
     """Refresh an expired Codex access token from the stored refresh token and
     persist the rotated tokens back to auth.json. Returns the new access token,
@@ -322,22 +422,12 @@ def refresh_codex_token(auth_file):
     rt = (a.get("tokens") or {}).get("refresh_token")
     if not rt:
         return None
-    try:
-        body = json.dumps({
-            "client_id": CODEX_OAUTH_CLIENT_ID,
-            "grant_type": "refresh_token",
-            "refresh_token": rt,
-            "scope": "openid profile email offline_access",
-        }).encode()
-        # retries=1: never re-POST a refresh (the server rotates the token, so a
-        # retry would burn a second one).
-        d = _http_json(CODEX_TOKEN_URL, {"Content-Type": "application/json"},
-                       data=body, retries=1)
-    except Exception:
+    d = _refresh_oauth(CODEX_TOKEN_URL, CODEX_OAUTH_CLIENT_ID, rt,
+                       scope="openid profile email offline_access",
+                       user_agent="codex_cli_rs/ai-tray")
+    if not d:
         return None
-    access = d.get("access_token")
-    if not access:
-        return None
+    access = d["access_token"]
     t = a.setdefault("tokens", {})
     t["access_token"] = access
     if d.get("id_token"):
@@ -415,18 +505,20 @@ def codex_data():
             rows.append((_limit_row(label, w.get("used_percent"),
                                     w.get("reset_at"), kind), False, None))
 
+    # Per-model / metered sub-limits (e.g. GPT-5.3-Codex-Spark). Label each
+    # window by its duration too — slot position is not a reliable indicator.
     for extra in (u.get("additional_rate_limits") or []):
         name = extra.get("limit_name") or extra.get("metered_feature") or "Extra"
         erl  = extra.get("rate_limit") or {}
-        epw  = erl.get("primary_window") or {}
-        esw  = erl.get("secondary_window") or {}
         rows.append((f"  {name} limit:", False, None))
-        if epw:
-            rows.append((_limit_row("  5h", epw.get("used_percent"),
-                                    epw.get("reset_at"), "5h"), False, None))
-        if esw:
-            rows.append((_limit_row("  Weekly", esw.get("used_percent"),
-                                    esw.get("reset_at"), "week"), False, None))
+        for slot, fallback in (("primary_window", ("5h limit", "5h")),
+                               ("secondary_window", ("Weekly limit", "week"))):
+            w = erl.get(slot) or {}
+            if w and w.get("used_percent") is not None:
+                label, kind = _codex_window_label(w, *fallback)
+                rows.append((_limit_row(f"  {label.replace(' limit', '')}",
+                                        w.get("used_percent"), w.get("reset_at"), kind),
+                             False, None))
 
     cr = u.get("credits") or {}
     if cr.get("has_credits") or cr.get("unlimited"):
@@ -444,14 +536,8 @@ def fetch_all():
 
 
 def worst_remaining_pct(data):
-    """Lowest 'N% left' value across Claude+Codex. Used for the tray label."""
-    worst = None
-    for tool in ("Claude Code", "Codex CLI"):
-        for text, *_ in data.get(tool, {}).get("rows", []):
-            if "% left" in text:
-                try:
-                    pct = int(text.split("% left")[0].split()[-1])
-                    worst = pct if worst is None else min(worst, pct)
-                except Exception:
-                    pass
-    return worst
+    """Lowest remaining % across every provider's 5h/weekly windows, from the
+    structured `summary` (no re-parsing of formatted row text)."""
+    vals = [summary_worst(info) for info in data.values() if isinstance(info, dict)]
+    vals = [v for v in vals if v is not None]
+    return int(round(min(vals))) if vals else None

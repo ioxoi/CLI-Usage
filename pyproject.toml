@@ -1,7 +1,7 @@
 [project]
 name = "cli-usage"
-version = "0.1.0"
-description = "Tray/menu-bar indicator for Claude Code, Codex CLI, and Gemini CLI usage."
+version = "0.2.0"
+description = "Tray/menu-bar indicator for Claude Code and Codex CLI usage."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { file = "LICENSE" }

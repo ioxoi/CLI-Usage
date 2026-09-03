@@ -19,7 +19,7 @@ from PIL import Image, ImageDraw, ImageFont
 import pystray
 from pystray import MenuItem as Item, Menu
 
-from cli_usage_core import fetch_all, worst_remaining_pct
+from cli_usage_core import PROVIDER_TAGS, fetch_all, summary_badge, worst_remaining_pct
 
 REFRESH_SECONDS = 60
 TOOL_CMDS = {"Claude Code": "claude", "Codex CLI": "codex"}
@@ -165,8 +165,13 @@ class XPlatTray:
             self.data = fetch_all()
         except Exception as e:
             self.data = {"_error": str(e)}
-        worst = worst_remaining_pct(self.data)
-        self.icon.title = f"cli-usage — {worst}% left" if worst is not None else "cli-usage"
+        # Hover title lists every provider in a fixed 5h/weekly order (same
+        # badge text as the Linux icons) instead of a single lowest number that
+        # flips between windows. The icon colour still follows the worst value.
+        worst  = worst_remaining_pct(self.data)
+        badges = [summary_badge(tag, self.data.get(name, {}))
+                  for name, tag in PROVIDER_TAGS.items()]
+        self.icon.title = "cli-usage — " + " · ".join(badges)
         self.icon.icon = _icon_image(worst)
         # Force menu redraw so the lazy items reflect new data.
         try:

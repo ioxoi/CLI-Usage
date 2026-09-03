@@ -27,7 +27,7 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-from cli_usage_core import fetch_all
+from cli_usage_core import PROVIDER_TAGS, fetch_all, summary_badge, summary_worst
 
 
 def sd_notify(state):
@@ -52,8 +52,8 @@ REFRESH_SECONDS = 60
 
 # (provider name as returned by fetch_all, short tray tag, CLI command)
 PROVIDERS = [
-    ("Claude Code", "CC", "claude"),
-    ("Codex CLI",   "CX", "codex"),
+    ("Claude Code", PROVIDER_TAGS["Claude Code"], "claude"),
+    ("Codex CLI",   PROVIDER_TAGS["Codex CLI"],   "codex"),
 ]
 
 
@@ -65,26 +65,6 @@ def usage_state(pct):
     if pct < 30:
         return "warning"
     return "healthy"
-
-
-def usage_icon_name(pct):
-    state = usage_state(pct)
-    if state == "critical":
-        return "dialog-error"
-    if state == "warning":
-        return "dialog-warning"
-    return "dialog-information"
-
-
-def usage_prefix(pct):
-    state = usage_state(pct)
-    if state == "critical":
-        return "🔴"
-    if state == "warning":
-        return "🟡"
-    if state == "healthy":
-        return "🟢"
-    return "⚪"
 
 
 # GNOME Shell renders the tray ICON reliably but ignores the AppIndicator text
@@ -127,42 +107,6 @@ def render_status_icon(tag, text, state, variant=""):
         cr.show_text(text)
         surface.write_to_png(str(path))
     return str(ICON_DIR), name
-
-
-def _pct(remaining):
-    """A remaining-percent as a short integer string."""
-    return str(int(round(remaining)))
-
-
-def tray_label(tag, info):
-    """Build the compact tray label for one provider.
-
-    Both windows present → "<color> <tag> <5h>/<weekly>" (e.g. "🟢 CC 94/71").
-    Only one window      → "<color> <tag> <n>%"          (e.g. "🟢 CX 85%").
-    No data / uninstalled → "⚪ <tag>".
-
-    Kept to ASCII digits + one emoji: the GNOME panel label renderer would
-    drop the whole CX label when it contained an en dash for the missing 5h
-    window, showing only the icon.
-    """
-    if not info.get("installed"):
-        return f"⚪ {tag}"
-    summary = info.get("summary") or {}
-    five, week = summary.get("5h"), summary.get("weekly")
-    present = [v for v in (five, week) if v is not None]
-    if not present:
-        return f"⚪ {tag}"
-    worst = min(present)
-    if five is not None and week is not None:
-        return f"{usage_prefix(worst)} {tag} {_pct(five)}/{_pct(week)}"
-    return f"{usage_prefix(worst)} {tag} {_pct(present[0])}%"
-
-
-def worst_of(info):
-    """Lowest remaining across a provider's 5h/weekly windows (for icon color)."""
-    summary = info.get("summary") or {}
-    present = [v for v in (summary.get("5h"), summary.get("weekly")) if v is not None]
-    return min(present) if present else None
 
 
 def markup_for_text(text):
@@ -223,17 +167,8 @@ class ProviderIndicator:
         # clear the text label. GNOME renders the label only intermittently —
         # present now, gone after a few hours — which both duplicated the icon
         # and was the recurring "numbers disappeared" bug.
-        summary = info.get("summary") or {}
-        five, week = summary.get("5h"), summary.get("weekly")
-        present = [v for v in (five, week) if v is not None]
-        if not info.get("installed") or not present:
-            state, text = "unknown", self.tag
-        elif five is not None and week is not None:
-            state = usage_state(min(present))
-            text = f"{self.tag} {int(round(five))}/{int(round(week))}%"
-        else:
-            state = usage_state(present[0])
-            text = f"{self.tag} {int(round(present[0]))}%"
+        text  = summary_badge(self.tag, info)
+        state = usage_state(summary_worst(info)) if info.get("installed") else "unknown"
         # Alternate the icon name every cycle (…-a / …-b) so GNOME always sees a
         # fresh icon and keeps rendering the item even when its value is static.
         self._tick += 1

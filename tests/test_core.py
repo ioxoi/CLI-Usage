@@ -35,12 +35,28 @@ class CoreFormattingTests(unittest.TestCase):
         self.assertIn("🟡", core._limit_row("5h limit", 75, None, "5h"))
         self.assertIn("25% left", core._limit_row("5h limit", 75, None, "5h"))
 
-    def test_worst_remaining_pct(self):
+    def test_worst_remaining_pct_uses_structured_summary(self):
         data = {
-            "Claude Code": {"rows": [("  🟢 5h limit [██] 80% left", False, None)]},
-            "Codex CLI": {"rows": [("  🔴 Weekly [█] 8% left", False, None)]},
+            "Claude Code": {"installed": True, "summary": {"5h": 80, "weekly": 60}},
+            "Codex CLI":   {"installed": True, "summary": {"5h": None, "weekly": 8}},
         }
         self.assertEqual(core.worst_remaining_pct(data), 8)
+        self.assertIsNone(core.worst_remaining_pct({"Claude Code": {"summary": {}}}))
+
+    def test_summary_badge_formats(self):
+        both = {"installed": True, "summary": {"5h": 86, "weekly": 32}}
+        one  = {"installed": True, "summary": {"5h": None, "weekly": 77}}
+        none = {"installed": True, "summary": {"5h": None, "weekly": None}}
+        off  = {"installed": False, "summary": {}}
+        self.assertEqual(core.summary_badge("CC", both), "CC 86/32%")
+        self.assertEqual(core.summary_badge("CX", one),  "CX 77%")
+        self.assertEqual(core.summary_badge("CC", none), "CC")
+        self.assertEqual(core.summary_badge("CX", off),  "CX")
+
+    def test_summary_worst(self):
+        self.assertEqual(core.summary_worst({"summary": {"5h": 94, "weekly": 8}}), 8)
+        self.assertEqual(core.summary_worst({"summary": {"5h": None, "weekly": 85}}), 85)
+        self.assertIsNone(core.summary_worst({"summary": {"5h": None, "weekly": None}}))
 
 
 class ValidationTests(unittest.TestCase):
@@ -276,6 +292,89 @@ class CodexRefreshTests(unittest.TestCase):
         self.assertEqual(saved["tokens"]["refresh_token"], "rotated")  # new RT persisted
         self.assertEqual(saved["tokens"]["access_token"], "new")
         self.assertEqual(saved["auth_mode"], "chatgpt")               # other fields preserved
+
+
+class ClaudeRefreshTests(unittest.TestCase):
+    CREDS = json.dumps({"claudeAiOauth": {"accessToken": "old", "refreshToken": "rt",
+                                          "subscriptionType": "team"}})
+
+    def _run(self, fake_http):
+        with patch("cli_usage_core.shutil.which", return_value="/usr/bin/claude"), \
+             patch("cli_usage_core.Path.exists", return_value=True), \
+             patch("cli_usage_core.Path.read_text", return_value=self.CREDS), \
+             patch("cli_usage_core._atomic_write_json") as write, \
+             patch("cli_usage_core._http_json", side_effect=fake_http):
+            return core.claude_data(), write
+
+    def test_401_refreshes_and_retries(self):
+        usage = {"n": 0}
+
+        def fake_http(url, headers, **kw):
+            if url == core.CLAUDE_TOKEN_URL:
+                return {"access_token": "new", "refresh_token": "rt2", "expires_in": 3600}
+            if url == core.CLAUDE_USAGE_URL:
+                usage["n"] += 1
+                if usage["n"] == 1:
+                    raise urllib.error.HTTPError(url, 401, "expired", {}, io.BytesIO())
+                self.assertEqual(headers["Authorization"], "Bearer new")
+                return {"five_hour": {"utilization": 20}, "seven_day": {"utilization": 30}}
+            raise AssertionError(url)
+
+        result, write = self._run(fake_http)
+        self.assertEqual(usage["n"], 2)
+        self.assertEqual(result["summary"], {"5h": 80, "weekly": 70})
+        write.assert_called_once()
+        saved = write.call_args[0][1]["claudeAiOauth"]
+        self.assertEqual(saved["refreshToken"], "rt2")   # rotated RT persisted
+        self.assertIn("expiresAt", saved)
+
+    def test_refresh_sends_real_user_agent(self):
+        # Anthropic's token endpoint is behind a Cloudflare integrity check that
+        # rejects a bare urllib User-Agent with "403 error code: 1010".
+        seen = {}
+
+        def fake_http(url, headers, **kw):
+            seen.update(headers)
+            return {"access_token": "new"}
+
+        with patch("cli_usage_core.Path.read_text", return_value=self.CREDS), \
+             patch("cli_usage_core._atomic_write_json"), \
+             patch("cli_usage_core._http_json", side_effect=fake_http):
+            self.assertEqual(core.refresh_claude_token(core.Path("/x")), "new")
+        self.assertNotIn(seen.get("User-Agent", ""), ("", "Python-urllib"))
+        self.assertTrue(seen["User-Agent"].startswith("claude-code/"))
+        self.assertEqual(seen["Accept"], "application/json")
+
+    def test_401_when_refresh_fails_shows_relogin(self):
+        def fake_http(url, headers, **kw):
+            if url == core.CLAUDE_TOKEN_URL:
+                raise urllib.error.HTTPError(url, 400, "bad", {}, io.BytesIO())
+            raise urllib.error.HTTPError(url, 401, "expired", {}, io.BytesIO())
+
+        result, _ = self._run(fake_http)
+        self.assertTrue(any("re-login required" in r[0] for r in result["rows"]))
+
+
+class CodexSubLimitLabelTests(unittest.TestCase):
+    def test_sub_limit_windows_labeled_by_duration_not_slot(self):
+        # primary_window here is a WEEKLY window (7d) — must not be labeled "5h".
+        payload = {"email": "x@y.z", "plan_type": "pro", "rate_limit": {},
+                   "additional_rate_limits": [{
+                       "limit_name": "Spark",
+                       "rate_limit": {
+                           "primary_window":   {"used_percent": 5, "limit_window_seconds": 604800},
+                           "secondary_window": {"used_percent": 7, "limit_window_seconds": 18000},
+                       }}]}
+        with patch("cli_usage_core.shutil.which", return_value="/usr/bin/codex"), \
+             patch("cli_usage_core.Path.exists", return_value=True), \
+             patch("cli_usage_core.Path.read_text",
+                   return_value=json.dumps({"tokens": {"access_token": "t"}})), \
+             patch("cli_usage_core._http_json", return_value=payload):
+            rows = [r[0] for r in core.codex_data()["rows"]]
+        sub = [r for r in rows if "% left" in r]
+        self.assertEqual(len(sub), 2)
+        self.assertIn("Weekly", sub[0])   # 604800s → Weekly, even though it's primary
+        self.assertIn("5h", sub[1])       # 18000s  → 5h, even though it's secondary
 
 
 if __name__ == "__main__":
