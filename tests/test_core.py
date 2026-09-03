@@ -53,6 +53,22 @@ class CoreFormattingTests(unittest.TestCase):
         self.assertEqual(core.summary_badge("CC", none), "CC")
         self.assertEqual(core.summary_badge("CX", off),  "CX")
 
+    def test_usage_state_thresholds_single_source(self):
+        # Shared by both frontends and the menu-row emoji.
+        self.assertEqual(core.usage_state(None), "unknown")
+        self.assertEqual(core.usage_state(9.9), "critical")
+        self.assertEqual(core.usage_state(10), "warning")
+        self.assertEqual(core.usage_state(29.9), "warning")
+        self.assertEqual(core.usage_state(30), "healthy")
+        self.assertEqual(core._status_icon(5), "🔴")
+        self.assertEqual(core._status_icon(None), "⚪")
+
+    def test_provider_registry_is_consistent(self):
+        self.assertEqual(list(core.PROVIDERS), ["Claude Code", "Codex CLI"])
+        self.assertEqual(core.PROVIDER_TAGS, {"Claude Code": "CC", "Codex CLI": "CX"})
+        self.assertEqual(core.PROVIDER_CMDS, {"Claude Code": "claude", "Codex CLI": "codex"})
+        self.assertEqual(set(core._FETCHERS), set(core.PROVIDERS))  # every provider has a fetcher
+
     def test_summary_worst(self):
         self.assertEqual(core.summary_worst({"summary": {"5h": 94, "weekly": 8}}), 8)
         self.assertEqual(core.summary_worst({"summary": {"5h": None, "weekly": 85}}), 85)

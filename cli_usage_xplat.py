@@ -19,10 +19,9 @@ from PIL import Image, ImageDraw, ImageFont
 import pystray
 from pystray import MenuItem as Item, Menu
 
-from cli_usage_core import PROVIDER_TAGS, fetch_all, summary_badge, worst_remaining_pct
+from cli_usage_core import PROVIDER_CMDS, PROVIDER_TAGS, fetch_all, summary_badge, usage_state, worst_remaining_pct
 
 REFRESH_SECONDS = 60
-TOOL_CMDS = {"Claude Code": "claude", "Codex CLI": "codex"}
 
 IS_MAC = sys.platform == "darwin"
 IS_WIN = sys.platform.startswith("win")
@@ -30,19 +29,8 @@ IS_WIN = sys.platform.startswith("win")
 
 # ── icon ─────────────────────────────────────────────────────────────────────
 
-def _usage_state(pct):
-    """Return visual state for remaining usage percentage."""
-    if pct is None:
-        return "unknown"
-    if pct < 10:
-        return "critical"
-    if pct < 30:
-        return "warning"
-    return "healthy"
-
-
 def _state_colors(pct):
-    state = _usage_state(pct)
+    state = usage_state(pct)
     if state == "critical":
         return (239, 68, 68, 255), (255, 255, 255, 255)   # red
     if state == "warning":
@@ -143,14 +131,14 @@ class XPlatTray:
         yield Item(f"cli-usage · {ts}", None, enabled=False)
         yield Menu.SEPARATOR
 
-        for name in ("Claude Code", "Codex CLI"):
+        for name in PROVIDER_TAGS:
             info = self.data.get(name, {})
             sym  = "●" if info.get("installed") else "○"
             yield Item(f"{sym}  {name}", None, enabled=False)
             for text, *_ in info.get("rows", []):
                 yield Item(text, None, enabled=False)
             if info.get("installed"):
-                cmd = TOOL_CMDS[name]
+                cmd = PROVIDER_CMDS[name]
                 yield Item("    Open terminal…", lambda _i, _it, c=cmd: open_terminal(c))
             yield Menu.SEPARATOR
 

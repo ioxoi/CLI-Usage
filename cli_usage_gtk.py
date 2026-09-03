@@ -27,7 +27,7 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-from cli_usage_core import PROVIDER_TAGS, fetch_all, summary_badge, summary_worst
+from cli_usage_core import PROVIDERS as CORE_PROVIDERS, fetch_all, summary_badge, summary_worst, usage_state
 
 
 def sd_notify(state):
@@ -50,21 +50,9 @@ def sd_notify(state):
 
 REFRESH_SECONDS = 60
 
-# (provider name as returned by fetch_all, short tray tag, CLI command)
-PROVIDERS = [
-    ("Claude Code", PROVIDER_TAGS["Claude Code"], "claude"),
-    ("Codex CLI",   PROVIDER_TAGS["Codex CLI"],   "codex"),
-]
-
-
-def usage_state(pct):
-    if pct is None:
-        return "unknown"
-    if pct < 10:
-        return "critical"
-    if pct < 30:
-        return "warning"
-    return "healthy"
+# (provider name as returned by fetch_all, short tray tag, CLI command) — from
+# the single registry in cli_usage_core so the frontends cannot drift.
+PROVIDERS = [(name, tag, cmd) for name, (tag, cmd) in CORE_PROVIDERS.items()]
 
 
 # GNOME Shell renders the tray ICON reliably but ignores the AppIndicator text

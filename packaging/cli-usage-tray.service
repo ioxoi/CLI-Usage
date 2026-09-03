@@ -1,3 +1,8 @@
+# Reference copy of the systemd user unit. `python3 install.py` writes the real
+# one to ~/.config/systemd/user/ with your actual interpreter and repo path
+# (this file uses %h = your home dir and assumes the default clone location).
+# Manual install:  cp packaging/cli-usage-tray.service ~/.config/systemd/user/
+#                  systemctl --user daemon-reload && systemctl --user enable --now cli-usage-tray
 [Unit]
 Description=CLI-Usage tray indicator (Claude Code + Codex usage)
 # Run inside the graphical session so DISPLAY/XAUTHORITY are available and
@@ -13,7 +18,7 @@ After=graphical-session.target
 Type=notify
 NotifyAccess=main
 WatchdogSec=300
-ExecStart=/usr/bin/python3 /home/homan/workspace/CLI-Usage/cli_usage_gtk.py
+ExecStart=/usr/bin/python3 %h/workspace/CLI-Usage/cli_usage_gtk.py
 # Restart on crash, X11 "Broken pipe" (nonzero exit), AND watchdog timeout;
 # but NOT after a clean Quit from the tray menu (exit 0).
 Restart=on-failure

@@ -12,16 +12,6 @@ except Exception:
 
 
 @unittest.skipUnless(HAVE_GTK, "GTK (gi) not importable in this environment")
-class UsageStateTests(unittest.TestCase):
-    def test_thresholds(self):
-        self.assertEqual(g.usage_state(None), "unknown")
-        self.assertEqual(g.usage_state(5), "critical")
-        self.assertEqual(g.usage_state(29), "warning")
-        self.assertEqual(g.usage_state(30), "healthy")
-        self.assertEqual(g.usage_state(100), "healthy")
-
-
-@unittest.skipUnless(HAVE_GTK, "GTK (gi) not importable in this environment")
 class RenderStatusIconTests(unittest.TestCase):
     """The number is drawn INTO the icon (GNOME ignores text labels), so the
     renderer is the thing that must be right. Runs headless via cairo."""

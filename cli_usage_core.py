@@ -24,8 +24,14 @@ CLAUDE_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
 # Public OAuth client id of Claude Code, used the same way for its token.
 CLAUDE_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 
-# Short tray tags per provider (shared by both frontends).
-PROVIDER_TAGS = {"Claude Code": "CC", "Codex CLI": "CX"}
+# Provider registry shared by both frontends: display name -> (tray tag, CLI
+# command). Order here is the display order.
+PROVIDERS = {
+    "Claude Code": ("CC", "claude"),
+    "Codex CLI":   ("CX", "codex"),
+}
+PROVIDER_TAGS = {name: tag for name, (tag, _cmd) in PROVIDERS.items()}
+PROVIDER_CMDS = {name: cmd for name, (_tag, cmd) in PROVIDERS.items()}
 
 BAR_WIDTH   = 12
 NET_TIMEOUT = 6
@@ -41,20 +47,32 @@ def _bar(remaining_pct):
     return f"[{'█'*filled}{'░'*(BAR_WIDTH-filled)}] {int(round(r))}% left"
 
 
+# Single source of the status thresholds, shared by both frontends and the
+# menu-row emoji so a change here cannot drift between them.
+CRITICAL_BELOW = 10
+WARNING_BELOW  = 30
+
+
+def usage_state(remaining_pct):
+    """'critical' (<10% left), 'warning' (<30%), 'healthy', or 'unknown'."""
+    if remaining_pct is None:
+        return "unknown"
+    r = float(remaining_pct)
+    if r < CRITICAL_BELOW:
+        return "critical"
+    if r < WARNING_BELOW:
+        return "warning"
+    return "healthy"
+
+
 def _status_icon(remaining_pct):
     """Emoji color cue that works in most native tray menus.
 
     Native menu APIs do not consistently support arbitrary colored text, so we
     use portable colored icons in the label itself.
     """
-    if remaining_pct is None:
-        return "⚪"
-    r = float(remaining_pct)
-    if r < 10:
-        return "🔴"
-    if r < 30:
-        return "🟡"
-    return "🟢"
+    return {"critical": "🔴", "warning": "🟡", "healthy": "🟢"}.get(
+        usage_state(remaining_pct), "⚪")
 
 
 def _parse_when(when):
@@ -528,11 +546,12 @@ def codex_data():
     return {"installed": True, "rows": rows, "summary": summary}
 
 
+_FETCHERS = {"Claude Code": claude_data, "Codex CLI": codex_data}
+
+
 def fetch_all():
-    return {
-        "Claude Code": claude_data(),
-        "Codex CLI":   codex_data(),
-    }
+    """Fetch every registered provider, in PROVIDERS order."""
+    return {name: _FETCHERS[name]() for name in PROVIDERS}
 
 
 def worst_remaining_pct(data):
