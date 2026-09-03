@@ -3,7 +3,8 @@
 
 Safe defaults:
 - installs Python deps only when needed
-- creates per-user startup entries
+- creates per-user startup entries (on Linux+GTK: a supervised systemd user
+  service with a watchdog, plus a start-menu launcher)
 - can run in --dry-run / --no-autostart / --no-launch modes for testing
 """
 
@@ -16,6 +17,8 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+from cli_usage_core import SERVICE_NAME
 
 APP_NAME = "cli-usage"
 ROOT = Path(__file__).resolve().parent
@@ -139,10 +142,19 @@ def install_linux_system_deps(*, dry_run: bool, install_system_deps: bool) -> No
     ], dry_run=dry_run)
 
 
+# The AppIndicator tray host ships under different extension ids: upstream
+# GNOME uses the rgcjonas one, Ubuntu bundles its own. Enable whichever exists.
+APPINDICATOR_EXTENSIONS = (
+    "ubuntu-appindicators@ubuntu.com",
+    "appindicatorsupport@rgcjonas.gmail.com",
+)
+
+
 def enable_gnome_extension(*, dry_run: bool) -> None:
     if not sys.platform.startswith("linux") or not command_exists("gnome-extensions"):
         return
-    run(["gnome-extensions", "enable", "appindicatorsupport@rgcjonas.gmail.com"], dry_run=dry_run, check=False)
+    for ext in APPINDICATOR_EXTENSIONS:
+        run(["gnome-extensions", "enable", ext], dry_run=dry_run, check=False)
 
 
 def install_linux_autostart(script: Path, python_bin: Path, *, dry_run: bool) -> Path:
@@ -151,7 +163,7 @@ def install_linux_autostart(script: Path, python_bin: Path, *, dry_run: bool) ->
     content = f"""[Desktop Entry]
 Type=Application
 Name=cli-usage
-Comment=Tray indicator showing rate-limit usage for Claude Code, Codex CLI, and Gemini CLI
+Comment=Tray indicator showing rate-limit usage for Claude Code and Codex CLI
 Exec={python_bin} {script}
 Icon=network-transmit-receive
 Terminal=false
@@ -165,6 +177,73 @@ X-GNOME-Autostart-enabled=true
         old.unlink(missing_ok=True)
         desktop.write_text(content)
     return desktop
+
+
+def install_linux_systemd(script: Path, python_bin: Path, *, dry_run: bool) -> Path:
+    """Install the GTK tray as a supervised systemd *user* service + a start-menu
+    launcher, and retire the legacy autostart .desktop entry.
+
+    The service (Type=notify + WatchdogSec) restarts the tray if it crashes or
+    freezes — a plain autostart entry can't. Leaving the old autostart entry in
+    place would launch a second, unsupervised tray on login, so it is removed.
+    """
+    unit_dir = Path.home() / ".config" / "systemd" / "user"
+    unit = unit_dir / SERVICE_NAME
+    apps_dir = Path.home() / ".local" / "share" / "applications"
+    launcher = apps_dir / "cli-usage.desktop"
+    legacy_autostart = Path.home() / ".config" / "autostart" / "cli-usage.desktop"
+
+    unit_text = f"""[Unit]
+Description=CLI-Usage tray indicator (Claude Code + Codex usage)
+# Run inside the graphical session so DISPLAY/XAUTHORITY are available and
+# the unit stops cleanly on logout.
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+# Type=notify + WatchdogSec: the app sends READY=1 once up and a WATCHDOG=1
+# heartbeat from its main-loop timer. If the loop freezes the heartbeat stops
+# and systemd restarts us — a plain Restart= cannot catch a hung process.
+Type=notify
+NotifyAccess=main
+WatchdogSec=300
+ExecStart={python_bin} {script}
+# Restart on crash, X11 "Broken pipe" (nonzero exit) and watchdog timeout,
+# but NOT after a clean Quit from the tray menu (exit 0).
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target
+"""
+    launcher_text = f"""[Desktop Entry]
+Type=Application
+Name=CLI Usage Tray
+GenericName=AI CLI usage indicator
+Comment=Show Claude Code and Codex usage in the system tray
+Exec=systemctl --user start {SERVICE_NAME}
+Icon=utilities-system-monitor
+Terminal=false
+Categories=Utility;System;Monitor;
+Keywords=claude;codex;usage;tray;quota;
+"""
+    log(f"Writing systemd user service: {unit}")
+    log(f"Writing start-menu launcher:  {launcher}")
+    if legacy_autostart.exists():
+        log(f"Removing legacy autostart entry (would double-launch): {legacy_autostart}")
+    if not dry_run:
+        unit_dir.mkdir(parents=True, exist_ok=True)
+        unit.write_text(unit_text)
+        apps_dir.mkdir(parents=True, exist_ok=True)
+        launcher.write_text(launcher_text)
+        legacy_autostart.unlink(missing_ok=True)
+    return unit
+
+
+def activate_linux_systemd(*, dry_run: bool) -> None:
+    """daemon-reload + enable --now the tray service (starts it immediately)."""
+    run(["systemctl", "--user", "daemon-reload"], dry_run=dry_run, check=False)
+    run(["systemctl", "--user", "enable", "--now", SERVICE_NAME], dry_run=dry_run, check=False)
 
 
 def install_macos_autostart(script: Path, python_bin: Path, *, dry_run: bool) -> Path:
@@ -214,15 +293,23 @@ def install_windows_autostart(script: Path, python_bin: Path, *, dry_run: bool) 
     return cmd_file
 
 
-def install_autostart(script: Path, python_bin: Path, *, dry_run: bool) -> Path | None:
+def install_autostart(script: Path, python_bin: Path, *, frontend: str, dry_run: bool) -> Path | None:
     if sys.platform == "darwin":
         return install_macos_autostart(script, python_bin, dry_run=dry_run)
     if os.name == "nt":
         return install_windows_autostart(script, python_bin, dry_run=dry_run)
     if sys.platform.startswith("linux"):
+        if frontend == "gtk":
+            # Supervised service (watchdog + restart) — the autostart .desktop
+            # path would run an unsupervised second copy.
+            return install_linux_systemd(script, python_bin, dry_run=dry_run)
         return install_linux_autostart(script, python_bin, dry_run=dry_run)
     log(f"Autostart is not implemented for this platform: {platform.platform()}")
     return None
+
+
+def uses_linux_systemd(frontend: str) -> bool:
+    return sys.platform.startswith("linux") and frontend == "gtk"
 
 
 def launch_app(script: Path, python_bin: Path, *, dry_run: bool) -> None:
@@ -264,17 +351,27 @@ def main(argv: list[str] | None = None) -> int:
         enable_gnome_extension(dry_run=args.dry_run)
 
     entry = None
+    systemd_started = False
     if not args.no_autostart:
-        entry = install_autostart(script, python_bin, dry_run=args.dry_run)
+        entry = install_autostart(script, python_bin, frontend=frontend, dry_run=args.dry_run)
+        if uses_linux_systemd(frontend):
+            # enable --now starts the tray under the supervisor; don't also
+            # launch a second unsupervised copy below.
+            activate_linux_systemd(dry_run=args.dry_run)
+            systemd_started = True
 
-    if not args.no_launch:
+    if not args.no_launch and not systemd_started:
         launch_app(script, python_bin, dry_run=args.dry_run)
 
     log("")
     log("Done.")
     if entry:
         log(f"Autostart entry: {entry}")
-    log(f"Log file: {LOG_PATH}")
+    if systemd_started:
+        log(f"Manage with: systemctl --user {{status|restart|stop}} {SERVICE_NAME}")
+        log("Quit from the tray menu stops it; relaunch from the app menu ('CLI Usage Tray').")
+    else:
+        log(f"Log file: {LOG_PATH}")
     return 0
 
 

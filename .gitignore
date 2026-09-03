@@ -16,3 +16,9 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Generated session reports / agent scratch (kept locally, not versioned)
+SESSION_REPORT.md
+session-report-*.md
+.antigravitycli/
+AGENTS.md

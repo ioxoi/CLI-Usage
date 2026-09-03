@@ -6,5 +6,5 @@ Comment=Show Claude Code and Codex usage in the system tray
 Exec=systemctl --user start cli-usage-tray.service
 Icon=utilities-system-monitor
 Terminal=false
-Categories=Utility;Monitor;
+Categories=Utility;System;Monitor;
 Keywords=claude;codex;usage;tray;quota;

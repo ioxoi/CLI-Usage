@@ -2,8 +2,12 @@
 """cli-usage — GTK/AppIndicator tray frontend (Linux).
 
 One tray indicator per provider (Claude Code, Codex CLI), so both usages are
-visible at a glance. Each label is `<color> <tag> <5h>/<weekly>` — the two
-windows always in the same order, so the number never "switches" on you.
+visible at a glance. The at-a-glance text (`CC 86/32%` = 5h / weekly, always
+in that order) is rendered INTO the icon image and colour-coded, because GNOME
+draws the AppIndicator icon reliably but its text label only intermittently.
+Full detail (every window, per-model limits, credits) is in each icon's menu.
+
+Runs as a systemd user service with a watchdog; Quit stops the service.
 """
 
 import gi
@@ -27,7 +31,8 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-from cli_usage_core import fetch_all
+from cli_usage_core import (PROVIDERS as CORE_PROVIDERS, SERVICE_NAME, fetch_all,
+                            summary_badge, summary_worst, usage_state)
 
 
 def sd_notify(state):
@@ -50,46 +55,18 @@ def sd_notify(state):
 
 REFRESH_SECONDS = 60
 
-# (provider name as returned by fetch_all, short tray tag, CLI command)
-PROVIDERS = [
-    ("Claude Code", "CC", "claude"),
-    ("Codex CLI",   "CX", "codex"),
-]
-
-
-def usage_state(pct):
-    if pct is None:
-        return "unknown"
-    if pct < 10:
-        return "critical"
-    if pct < 30:
-        return "warning"
-    return "healthy"
-
-
-def usage_icon_name(pct):
-    state = usage_state(pct)
-    if state == "critical":
-        return "dialog-error"
-    if state == "warning":
-        return "dialog-warning"
-    return "dialog-information"
-
-
-def usage_prefix(pct):
-    state = usage_state(pct)
-    if state == "critical":
-        return "🔴"
-    if state == "warning":
-        return "🟡"
-    if state == "healthy":
-        return "🟢"
-    return "⚪"
+# (provider name as returned by fetch_all, short tray tag, CLI command) — from
+# the single registry in cli_usage_core so the frontends cannot drift.
+PROVIDERS = [(name, tag, cmd) for name, (tag, cmd) in CORE_PROVIDERS.items()]
 
 
 # GNOME Shell renders the tray ICON reliably but ignores the AppIndicator text
 # label, so we draw the number INTO the icon instead of setting a label.
 ICON_DIR = Path.home() / ".cache" / "cli-usage-icons"
+# Every distinct value renders a new PNG (x2 for the a/b variant), so without a
+# cap the cache grows forever (~2.5k files / 18 MB in three weeks). Keep the
+# most recently used files only; anything evicted is simply re-rendered.
+ICON_CACHE_MAX = 200
 STATUS_RGB = {
     "healthy":  (0.13, 0.77, 0.37),
     "warning":  (0.85, 0.47, 0.02),
@@ -126,43 +103,30 @@ def render_status_icon(tag, text, state, variant=""):
         cr.move_to(7 - xb, (height - th) / 2 - yb)
         cr.show_text(text)
         surface.write_to_png(str(path))
+        _prune_icon_cache(protect=path)
+    else:
+        path.touch()  # mark as recently used so pruning keeps live values
     return str(ICON_DIR), name
 
 
-def _pct(remaining):
-    """A remaining-percent as a short integer string."""
-    return str(int(round(remaining)))
+def _prune_icon_cache(keep=None, protect=None):
+    """Delete the least-recently-used cached icons beyond ICON_CACHE_MAX.
 
-
-def tray_label(tag, info):
-    """Build the compact tray label for one provider.
-
-    Both windows present → "<color> <tag> <5h>/<weekly>" (e.g. "🟢 CC 94/71").
-    Only one window      → "<color> <tag> <n>%"          (e.g. "🟢 CX 85%").
-    No data / uninstalled → "⚪ <tag>".
-
-    Kept to ASCII digits + one emoji: the GNOME panel label renderer would
-    drop the whole CX label when it contained an en dash for the missing 5h
-    window, showing only the icon.
+    `protect` (the icon just rendered) is never evicted, even if mtime
+    granularity makes it look as old as the files being pruned.
     """
-    if not info.get("installed"):
-        return f"⚪ {tag}"
-    summary = info.get("summary") or {}
-    five, week = summary.get("5h"), summary.get("weekly")
-    present = [v for v in (five, week) if v is not None]
-    if not present:
-        return f"⚪ {tag}"
-    worst = min(present)
-    if five is not None and week is not None:
-        return f"{usage_prefix(worst)} {tag} {_pct(five)}/{_pct(week)}"
-    return f"{usage_prefix(worst)} {tag} {_pct(present[0])}%"
-
-
-def worst_of(info):
-    """Lowest remaining across a provider's 5h/weekly windows (for icon color)."""
-    summary = info.get("summary") or {}
-    present = [v for v in (summary.get("5h"), summary.get("weekly")) if v is not None]
-    return min(present) if present else None
+    keep = ICON_CACHE_MAX if keep is None else keep
+    try:
+        files = sorted((p for p in ICON_DIR.glob("cliusage-*.png") if p != protect),
+                       key=lambda p: p.stat().st_mtime)
+        budget = keep - (1 if protect else 0)
+        for old in files[:-budget] if budget > 0 else files:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
 
 
 def markup_for_text(text):
@@ -223,17 +187,8 @@ class ProviderIndicator:
         # clear the text label. GNOME renders the label only intermittently —
         # present now, gone after a few hours — which both duplicated the icon
         # and was the recurring "numbers disappeared" bug.
-        summary = info.get("summary") or {}
-        five, week = summary.get("5h"), summary.get("weekly")
-        present = [v for v in (five, week) if v is not None]
-        if not info.get("installed") or not present:
-            state, text = "unknown", self.tag
-        elif five is not None and week is not None:
-            state = usage_state(min(present))
-            text = f"{self.tag} {int(round(five))}/{int(round(week))}%"
-        else:
-            state = usage_state(present[0])
-            text = f"{self.tag} {int(round(present[0]))}%"
+        text  = summary_badge(self.tag, info)
+        state = usage_state(summary_worst(info)) if info.get("installed") else "unknown"
         # Alternate the icon name every cycle (…-a / …-b) so GNOME always sees a
         # fresh icon and keeps rendering the item even when its value is static.
         self._tick += 1
@@ -323,14 +278,17 @@ class AITray:
         self.do_refresh()
 
     def _quit(self):
-        # A manual Quit should STAY quit. Under systemd, stop the unit so it is
-        # not treated as a crash and restarted; the launcher (or next login)
-        # brings it back. Outside systemd, just exit the main loop.
+        # A manual Quit should STAY quit. Under systemd, ask systemd to stop the
+        # unit and let IT terminate us: the unit then ends in a clean "inactive"
+        # state and Restart=on-failure never fires. (Exiting ourselves first
+        # would also avoid a restart — exit 0 isn't a failure — but leaves a
+        # stop racing a dead process.) Outside systemd, just exit the loop.
         if os.environ.get("INVOCATION_ID"):
             try:
-                subprocess.Popen(["systemctl", "--user", "stop", "cli-usage-tray.service"])
+                subprocess.Popen(["systemctl", "--user", "stop", SERVICE_NAME])
+                return
             except Exception:
-                pass
+                pass  # fall through and exit directly
         Gtk.main_quit()
 
 

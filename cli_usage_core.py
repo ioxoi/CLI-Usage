@@ -5,7 +5,9 @@ Works on Linux, macOS, and Windows. Used by both the GTK and pystray frontends.
 
 import json
 import os
+import re
 import shutil
+import sys
 import tempfile
 import time
 import urllib.error
@@ -18,6 +20,25 @@ CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
 # Public OAuth client id of the Codex CLI (from its `codex login` URL). Used to
 # refresh an expired access token from the stored refresh token, like the CLI.
 CODEX_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
+
+CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+CLAUDE_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
+# Public OAuth client id of Claude Code, used the same way for its token.
+CLAUDE_OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+# Used in the token-endpoint User-Agent only if `claude --version` is unavailable.
+CLAUDE_FALLBACK_VERSION = "2.1.259"
+
+# Provider registry shared by both frontends: display name -> (tray tag, CLI
+# command). Order here is the display order.
+PROVIDERS = {
+    "Claude Code": ("CC", "claude"),
+    "Codex CLI":   ("CX", "codex"),
+}
+PROVIDER_TAGS = {name: tag for name, (tag, _cmd) in PROVIDERS.items()}
+PROVIDER_CMDS = {name: cmd for name, (_tag, cmd) in PROVIDERS.items()}
+
+# systemd user unit name (Linux). Shared by the GTK Quit action and installer.
+SERVICE_NAME = "cli-usage-tray.service"
 
 BAR_WIDTH   = 12
 NET_TIMEOUT = 6
@@ -33,20 +54,32 @@ def _bar(remaining_pct):
     return f"[{'█'*filled}{'░'*(BAR_WIDTH-filled)}] {int(round(r))}% left"
 
 
+# Single source of the status thresholds, shared by both frontends and the
+# menu-row emoji so a change here cannot drift between them.
+CRITICAL_BELOW = 10
+WARNING_BELOW  = 30
+
+
+def usage_state(remaining_pct):
+    """'critical' (<10% left), 'warning' (<30%), 'healthy', or 'unknown'."""
+    if remaining_pct is None:
+        return "unknown"
+    r = float(remaining_pct)
+    if r < CRITICAL_BELOW:
+        return "critical"
+    if r < WARNING_BELOW:
+        return "warning"
+    return "healthy"
+
+
 def _status_icon(remaining_pct):
     """Emoji color cue that works in most native tray menus.
 
     Native menu APIs do not consistently support arbitrary colored text, so we
     use portable colored icons in the label itself.
     """
-    if remaining_pct is None:
-        return "⚪"
-    r = float(remaining_pct)
-    if r < 10:
-        return "🔴"
-    if r < 30:
-        return "🟡"
-    return "🟢"
+    return {"critical": "🔴", "warning": "🟡", "healthy": "🟢"}.get(
+        usage_state(remaining_pct), "⚪")
 
 
 def _parse_when(when):
@@ -144,9 +177,90 @@ def _http_json(url, headers, timeout=NET_TIMEOUT, retries=NET_RETRIES, backoff=N
     raise last_exc
 
 
+def _atomic_write_json(path, obj):
+    """Write JSON to `path` atomically, keeping 0600 perms (it holds tokens)."""
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(obj, f, indent=2)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _merge_write_json(path, mutate):
+    """Re-read `path`, apply `mutate(obj)`, and write it back atomically.
+
+    The CLI that owns the credential file may rewrite it while we are
+    refreshing (it refreshes its own token too). Re-reading right before the
+    write and mutating only our fields means we never clobber a newer token or
+    unrelated keys the CLI just saved — a blind write of our stale copy could
+    strand a rotated refresh token and force a manual re-login.
+    """
+    try:
+        current = json.loads(path.read_text())
+    except Exception:
+        current = {}
+    mutate(current)
+    _atomic_write_json(path, current)
+
+
+def _refresh_oauth(token_url, client_id, refresh_token, scope=None, user_agent="cli-usage"):
+    """POST a refresh_token grant; return the token response dict or None.
+
+    retries=1 on purpose: providers rotate the refresh token, so re-POSTing a
+    refresh could burn a second one. A realistic User-Agent is required:
+    Anthropic's token endpoint sits behind a Cloudflare integrity check that
+    answers a bare urllib UA with "403 error code: 1010" instead of OAuth JSON.
+    """
+    try:
+        payload = {
+            "client_id": client_id,
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+        }
+        if scope:
+            payload["scope"] = scope
+        body = json.dumps(payload).encode()
+        headers = {"Content-Type": "application/json", "Accept": "application/json",
+                   "User-Agent": user_agent}
+        d = _http_json(token_url, headers, data=body, retries=1)
+    except Exception:
+        return None
+    return d if isinstance(d, dict) and d.get("access_token") else None
+
+
 def _remaining(used_pct):
     """Remaining percent from a used percent, or None if unknown."""
     return None if used_pct is None else 100 - float(used_pct)
+
+
+def summary_worst(info):
+    """Lowest remaining % across a provider's 5h/weekly windows, or None."""
+    vals = [v for v in (info.get("summary") or {}).values() if v is not None]
+    return min(vals) if vals else None
+
+
+def summary_badge(tag, info):
+    """Compact at-a-glance text for a provider, shared by both frontends.
+
+    Both windows → "CC 86/32%" (5h/weekly, always that order);
+    one window   → "CX 77%";
+    no data / not installed → just the tag.
+    """
+    summary = info.get("summary") or {}
+    five, week = summary.get("5h"), summary.get("weekly")
+    present = [v for v in (five, week) if v is not None]
+    if not info.get("installed") or not present:
+        return tag
+    if five is not None and week is not None:
+        return f"{tag} {int(round(five))}/{int(round(week))}%"
+    return f"{tag} {int(round(present[0]))}%"
 
 
 def _codex_window_label(window, fallback="Limit", fallback_kind="week"):
@@ -209,6 +323,93 @@ def validate_codex_usage(data):
 
 # ── Claude Code ──────────────────────────────────────────────────────────────
 
+_claude_ua_cache = None
+
+
+def claude_user_agent():
+    """User-Agent for Anthropic's OAuth token endpoint.
+
+    That endpoint routes on the User-Agent: only a string matching a *real*
+    current Claude Code build ("claude-code/<version>") reaches the refresh
+    handler — anything else (a made-up name, an old version) is answered with
+    404 not_found. So we report the version of the installed `claude` binary.
+    Cached per process; falls back to a recent known version if `claude` can't
+    be queried.
+    """
+    global _claude_ua_cache
+    if _claude_ua_cache:
+        return _claude_ua_cache
+    version = None
+    try:
+        import subprocess
+        out = subprocess.run(["claude", "--version"], capture_output=True, text=True, timeout=5).stdout
+        m = re.search(r"\b(\d+\.\d+\.\d+)\b", out)
+        version = m.group(1) if m else None
+    except Exception:
+        version = None
+    _claude_ua_cache = f"claude-code/{version or CLAUDE_FALLBACK_VERSION}"
+    return _claude_ua_cache
+
+
+def refresh_claude_token(creds_file):
+    """Refresh an expired Claude Code access token from its stored refresh
+    token and persist the result back to .credentials.json. Returns the new
+    access token, or None if unavailable/failed. Mirrors refresh_codex_token so
+    a ~expired token self-heals instead of showing "re-login required".
+    """
+    try:
+        c = json.loads(creds_file.read_text())
+    except Exception:
+        return None
+    o = c.get("claudeAiOauth") or {}
+    rt = o.get("refreshToken")
+    if not rt:
+        return None
+    d = _refresh_oauth(CLAUDE_TOKEN_URL, CLAUDE_OAUTH_CLIENT_ID, rt,
+                       user_agent=claude_user_agent())
+    if not d:
+        return None
+    access = d["access_token"]
+
+    def apply(current):
+        o = current.setdefault("claudeAiOauth", {})
+        o["accessToken"] = access
+        if d.get("refresh_token"):      # rotated — persist the new one
+            o["refreshToken"] = d["refresh_token"]
+        if d.get("expires_in"):
+            o["expiresAt"] = int((time.time() + float(d["expires_in"])) * 1000)
+
+    try:
+        _merge_write_json(creds_file, apply)
+    except Exception as exc:
+        # The server already rotated the refresh token; if we can't save it the
+        # copy on disk is now dead and the next refresh WILL fail. Say so loudly
+        # (this lands in the systemd journal) rather than fail silently later.
+        print(f"cli-usage: refreshed Claude token but could not write {creds_file}: {exc}",
+              file=sys.stderr, flush=True)
+    return access
+
+
+def _claude_usage(tok, creds_file):
+    """Fetch Claude usage; on a 401 (expired token) refresh once and retry."""
+    headers = {
+        "Authorization":     f"Bearer {tok}",
+        "anthropic-beta":    "oauth-2025-04-20",
+        "anthropic-version": "2023-06-01",
+        "User-Agent":        "claude-code/ai-tray",
+    }
+    try:
+        return validate_claude_usage(_http_json(CLAUDE_USAGE_URL, headers))
+    except urllib.error.HTTPError as e:
+        if e.code != 401:
+            raise
+        new = refresh_claude_token(creds_file)
+        if not new:
+            raise
+        headers["Authorization"] = f"Bearer {new}"
+        return validate_claude_usage(_http_json(CLAUDE_USAGE_URL, headers))
+
+
 def claude_data():
     rows = []
     summary = {"5h": None, "weekly": None}
@@ -246,15 +447,7 @@ def claude_data():
 
     if tok:
         try:
-            u = validate_claude_usage(_http_json(
-                "https://api.anthropic.com/api/oauth/usage",
-                {
-                    "Authorization":     f"Bearer {tok}",
-                    "anthropic-beta":    "oauth-2025-04-20",
-                    "anthropic-version": "2023-06-01",
-                    "User-Agent":        "claude-code/ai-tray",
-                },
-            ))
+            u = _claude_usage(tok, creds)
         except Exception as e:
             rows.extend(_usage_error_rows(e, "claude /login"))
             return {"installed": True, "rows": rows, "summary": summary}
@@ -292,22 +485,6 @@ def claude_data():
 
 # ── Codex CLI ────────────────────────────────────────────────────────────────
 
-def _atomic_write_json(path, obj):
-    """Write JSON to `path` atomically, keeping 0600 perms (it holds tokens)."""
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(obj, f, indent=2)
-        os.chmod(tmp, 0o600)
-        os.replace(tmp, path)
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-
-
 def refresh_codex_token(auth_file):
     """Refresh an expired Codex access token from the stored refresh token and
     persist the rotated tokens back to auth.json. Returns the new access token,
@@ -322,33 +499,29 @@ def refresh_codex_token(auth_file):
     rt = (a.get("tokens") or {}).get("refresh_token")
     if not rt:
         return None
-    try:
-        body = json.dumps({
-            "client_id": CODEX_OAUTH_CLIENT_ID,
-            "grant_type": "refresh_token",
-            "refresh_token": rt,
-            "scope": "openid profile email offline_access",
-        }).encode()
-        # retries=1: never re-POST a refresh (the server rotates the token, so a
-        # retry would burn a second one).
-        d = _http_json(CODEX_TOKEN_URL, {"Content-Type": "application/json"},
-                       data=body, retries=1)
-    except Exception:
+    d = _refresh_oauth(CODEX_TOKEN_URL, CODEX_OAUTH_CLIENT_ID, rt,
+                       scope="openid profile email offline_access",
+                       user_agent="codex_cli_rs/ai-tray")
+    if not d:
         return None
-    access = d.get("access_token")
-    if not access:
-        return None
-    t = a.setdefault("tokens", {})
-    t["access_token"] = access
-    if d.get("id_token"):
-        t["id_token"] = d["id_token"]
-    if d.get("refresh_token"):          # rotated — must persist the new one
-        t["refresh_token"] = d["refresh_token"]
-    a["last_refresh"] = time.strftime("%Y-%m-%dT%H:%M:%S.000000000Z", time.gmtime())
+    access = d["access_token"]
+
+    def apply(current):
+        t = current.setdefault("tokens", {})
+        t["access_token"] = access
+        if d.get("id_token"):
+            t["id_token"] = d["id_token"]
+        if d.get("refresh_token"):      # rotated — must persist the new one
+            t["refresh_token"] = d["refresh_token"]
+        current["last_refresh"] = time.strftime("%Y-%m-%dT%H:%M:%S.000000000Z", time.gmtime())
+
     try:
-        _atomic_write_json(auth_file, a)
-    except Exception:
-        pass  # even if persisting fails, the token works for this cycle
+        _merge_write_json(auth_file, apply)
+    except Exception as exc:
+        # See refresh_claude_token: a rotated-but-unsaved refresh token strands
+        # the on-disk copy, so this must be visible in the journal.
+        print(f"cli-usage: refreshed Codex token but could not write {auth_file}: {exc}",
+              file=sys.stderr, flush=True)
     return access
 
 
@@ -415,18 +588,20 @@ def codex_data():
             rows.append((_limit_row(label, w.get("used_percent"),
                                     w.get("reset_at"), kind), False, None))
 
+    # Per-model / metered sub-limits (e.g. GPT-5.3-Codex-Spark). Label each
+    # window by its duration too — slot position is not a reliable indicator.
     for extra in (u.get("additional_rate_limits") or []):
         name = extra.get("limit_name") or extra.get("metered_feature") or "Extra"
         erl  = extra.get("rate_limit") or {}
-        epw  = erl.get("primary_window") or {}
-        esw  = erl.get("secondary_window") or {}
         rows.append((f"  {name} limit:", False, None))
-        if epw:
-            rows.append((_limit_row("  5h", epw.get("used_percent"),
-                                    epw.get("reset_at"), "5h"), False, None))
-        if esw:
-            rows.append((_limit_row("  Weekly", esw.get("used_percent"),
-                                    esw.get("reset_at"), "week"), False, None))
+        for slot, fallback in (("primary_window", ("5h limit", "5h")),
+                               ("secondary_window", ("Weekly limit", "week"))):
+            w = erl.get(slot) or {}
+            if w and w.get("used_percent") is not None:
+                label, kind = _codex_window_label(w, *fallback)
+                rows.append((_limit_row(f"  {label.replace(' limit', '')}",
+                                        w.get("used_percent"), w.get("reset_at"), kind),
+                             False, None))
 
     cr = u.get("credits") or {}
     if cr.get("has_credits") or cr.get("unlimited"):
@@ -436,22 +611,17 @@ def codex_data():
     return {"installed": True, "rows": rows, "summary": summary}
 
 
+_FETCHERS = {"Claude Code": claude_data, "Codex CLI": codex_data}
+
+
 def fetch_all():
-    return {
-        "Claude Code": claude_data(),
-        "Codex CLI":   codex_data(),
-    }
+    """Fetch every registered provider, in PROVIDERS order."""
+    return {name: _FETCHERS[name]() for name in PROVIDERS}
 
 
 def worst_remaining_pct(data):
-    """Lowest 'N% left' value across Claude+Codex. Used for the tray label."""
-    worst = None
-    for tool in ("Claude Code", "Codex CLI"):
-        for text, *_ in data.get(tool, {}).get("rows", []):
-            if "% left" in text:
-                try:
-                    pct = int(text.split("% left")[0].split()[-1])
-                    worst = pct if worst is None else min(worst, pct)
-                except Exception:
-                    pass
-    return worst
+    """Lowest remaining % across every provider's 5h/weekly windows, from the
+    structured `summary` (no re-parsing of formatted row text)."""
+    vals = [summary_worst(info) for info in data.values() if isinstance(info, dict)]
+    vals = [v for v in vals if v is not None]
+    return int(round(min(vals))) if vals else None

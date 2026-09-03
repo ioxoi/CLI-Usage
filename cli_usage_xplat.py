@@ -19,10 +19,9 @@ from PIL import Image, ImageDraw, ImageFont
 import pystray
 from pystray import MenuItem as Item, Menu
 
-from cli_usage_core import fetch_all, worst_remaining_pct
+from cli_usage_core import PROVIDER_CMDS, PROVIDER_TAGS, fetch_all, summary_badge, usage_state, worst_remaining_pct
 
 REFRESH_SECONDS = 60
-TOOL_CMDS = {"Claude Code": "claude", "Codex CLI": "codex"}
 
 IS_MAC = sys.platform == "darwin"
 IS_WIN = sys.platform.startswith("win")
@@ -30,19 +29,8 @@ IS_WIN = sys.platform.startswith("win")
 
 # ── icon ─────────────────────────────────────────────────────────────────────
 
-def _usage_state(pct):
-    """Return visual state for remaining usage percentage."""
-    if pct is None:
-        return "unknown"
-    if pct < 10:
-        return "critical"
-    if pct < 30:
-        return "warning"
-    return "healthy"
-
-
 def _state_colors(pct):
-    state = _usage_state(pct)
+    state = usage_state(pct)
     if state == "critical":
         return (239, 68, 68, 255), (255, 255, 255, 255)   # red
     if state == "warning":
@@ -143,14 +131,14 @@ class XPlatTray:
         yield Item(f"cli-usage · {ts}", None, enabled=False)
         yield Menu.SEPARATOR
 
-        for name in ("Claude Code", "Codex CLI"):
+        for name in PROVIDER_TAGS:
             info = self.data.get(name, {})
             sym  = "●" if info.get("installed") else "○"
             yield Item(f"{sym}  {name}", None, enabled=False)
             for text, *_ in info.get("rows", []):
                 yield Item(text, None, enabled=False)
             if info.get("installed"):
-                cmd = TOOL_CMDS[name]
+                cmd = PROVIDER_CMDS[name]
                 yield Item("    Open terminal…", lambda _i, _it, c=cmd: open_terminal(c))
             yield Menu.SEPARATOR
 
@@ -165,8 +153,13 @@ class XPlatTray:
             self.data = fetch_all()
         except Exception as e:
             self.data = {"_error": str(e)}
-        worst = worst_remaining_pct(self.data)
-        self.icon.title = f"cli-usage — {worst}% left" if worst is not None else "cli-usage"
+        # Hover title lists every provider in a fixed 5h/weekly order (same
+        # badge text as the Linux icons) instead of a single lowest number that
+        # flips between windows. The icon colour still follows the worst value.
+        worst  = worst_remaining_pct(self.data)
+        badges = [summary_badge(tag, self.data.get(name, {}))
+                  for name, tag in PROVIDER_TAGS.items()]
+        self.icon.title = "cli-usage — " + " · ".join(badges)
         self.icon.icon = _icon_image(worst)
         # Force menu redraw so the lazy items reflect new data.
         try:

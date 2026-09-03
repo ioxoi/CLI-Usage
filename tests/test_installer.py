@@ -44,6 +44,50 @@ class InstallerTests(unittest.TestCase):
                 text = entry.read_text()
                 self.assertIn("cli_usage_xplat.py", text)
 
+    def test_linux_systemd_writes_unit_and_launcher_and_removes_legacy_autostart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"HOME": tmp}):
+                legacy = Path(tmp) / ".config" / "autostart" / "cli-usage.desktop"
+                legacy.parent.mkdir(parents=True)
+                legacy.write_text("[Desktop Entry]\nX-GNOME-Autostart-enabled=true\n")
+
+                unit = install.install_linux_systemd(Path("/app/cli_usage_gtk.py"), Path("/usr/bin/python3"), dry_run=False)
+
+                self.assertTrue(unit.exists())
+                text = unit.read_text()
+                self.assertIn("Type=notify", text)
+                self.assertIn("WatchdogSec=", text)
+                self.assertIn("Restart=on-failure", text)
+                self.assertIn("ExecStart=/usr/bin/python3 /app/cli_usage_gtk.py", text)
+                launcher = Path(tmp) / ".local" / "share" / "applications" / "cli-usage.desktop"
+                self.assertTrue(launcher.exists())
+                self.assertIn("systemctl --user start cli-usage-tray.service", launcher.read_text())
+                self.assertFalse(legacy.exists(), "legacy autostart must be removed to avoid a double launch")
+
+    def test_linux_systemd_dry_run_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"HOME": tmp}):
+                unit = install.install_linux_systemd(Path("/app/cli_usage_gtk.py"), Path("/usr/bin/python3"), dry_run=True)
+                self.assertFalse(unit.exists())
+
+    @patch("install.sys")
+    def test_linux_gtk_dispatches_to_systemd_not_autostart(self, fake_sys):
+        fake_sys.platform = "linux"
+        with patch("install.install_linux_systemd", return_value=Path("/u")) as sd, \
+             patch("install.install_linux_autostart") as auto:
+            install.install_autostart(Path("/app/cli_usage_gtk.py"), Path("/py"), frontend="gtk", dry_run=True)
+            sd.assert_called_once()
+            auto.assert_not_called()
+
+    @patch("install.sys")
+    def test_linux_xplat_still_uses_autostart_desktop(self, fake_sys):
+        fake_sys.platform = "linux"
+        with patch("install.install_linux_systemd") as sd, \
+             patch("install.install_linux_autostart", return_value=Path("/a")) as auto:
+            install.install_autostart(Path("/app/cli_usage_xplat.py"), Path("/py"), frontend="xplat", dry_run=True)
+            auto.assert_called_once()
+            sd.assert_not_called()
+
     def test_main_dry_run_no_launch_no_autostart(self):
         rc = install.main(["--dry-run", "--skip-deps", "--no-launch", "--no-autostart", "--frontend", "xplat"])
         self.assertEqual(rc, 0)
