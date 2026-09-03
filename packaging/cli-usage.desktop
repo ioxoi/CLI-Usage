@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=CLI Usage Tray
+GenericName=AI CLI usage indicator
+Comment=Show Claude Code and Codex usage in the system tray
+Exec=systemctl --user start cli-usage-tray.service
+Icon=utilities-system-monitor
+Terminal=false
+Categories=Utility;Monitor;
+Keywords=claude;codex;usage;tray;quota;

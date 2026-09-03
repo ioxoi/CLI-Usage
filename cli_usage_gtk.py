@@ -285,7 +285,7 @@ class ProviderIndicator:
 class AITray:
     def __init__(self):
         self.panels = [
-            ProviderIndicator(name, tag, cmd, self._do_refresh_click, Gtk.main_quit)
+            ProviderIndicator(name, tag, cmd, self._do_refresh_click, self._quit)
             for (name, tag, cmd) in PROVIDERS
         ]
         sd_notify("READY=1")
@@ -321,6 +321,17 @@ class AITray:
 
     def _do_refresh_click(self):
         self.do_refresh()
+
+    def _quit(self):
+        # A manual Quit should STAY quit. Under systemd, stop the unit so it is
+        # not treated as a crash and restarted; the launcher (or next login)
+        # brings it back. Outside systemd, just exit the main loop.
+        if os.environ.get("INVOCATION_ID"):
+            try:
+                subprocess.Popen(["systemctl", "--user", "stop", "cli-usage-tray.service"])
+            except Exception:
+                pass
+        Gtk.main_quit()
 
 
 if __name__ == "__main__":

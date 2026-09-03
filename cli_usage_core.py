@@ -4,12 +4,20 @@ Works on Linux, macOS, and Windows. Used by both the GTK and pystray frontends.
 """
 
 import json
+import os
 import shutil
+import tempfile
 import time
 import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
+
+CODEX_USAGE_URL = "https://chatgpt.com/backend-api/codex/usage"
+CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token"
+# Public OAuth client id of the Codex CLI (from its `codex login` URL). Used to
+# refresh an expired access token from the stored refresh token, like the CLI.
+CODEX_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 
 BAR_WIDTH   = 12
 NET_TIMEOUT = 6
@@ -109,8 +117,8 @@ def _as_optional_number(value, name):
         raise ProviderResponseError(f"{name} was not numeric") from exc
 
 
-def _http_json(url, headers, timeout=NET_TIMEOUT, retries=NET_RETRIES, backoff=NET_BACKOFF):
-    req = urllib.request.Request(url, headers=headers)
+def _http_json(url, headers, timeout=NET_TIMEOUT, retries=NET_RETRIES, backoff=NET_BACKOFF, data=None):
+    req = urllib.request.Request(url, headers=headers, data=data)
     last_exc = None
     for attempt in range(retries):
         try:
@@ -284,6 +292,85 @@ def claude_data():
 
 # ── Codex CLI ────────────────────────────────────────────────────────────────
 
+def _atomic_write_json(path, obj):
+    """Write JSON to `path` atomically, keeping 0600 perms (it holds tokens)."""
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(obj, f, indent=2)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def refresh_codex_token(auth_file):
+    """Refresh an expired Codex access token from the stored refresh token and
+    persist the rotated tokens back to auth.json. Returns the new access token,
+    or None if there is no refresh token or the refresh failed. This is what the
+    Codex CLI does on its own; doing it here lets the tray self-heal an expired
+    token instead of showing "re-login required" every ~10 days.
+    """
+    try:
+        a = json.loads(auth_file.read_text())
+    except Exception:
+        return None
+    rt = (a.get("tokens") or {}).get("refresh_token")
+    if not rt:
+        return None
+    try:
+        body = json.dumps({
+            "client_id": CODEX_OAUTH_CLIENT_ID,
+            "grant_type": "refresh_token",
+            "refresh_token": rt,
+            "scope": "openid profile email offline_access",
+        }).encode()
+        # retries=1: never re-POST a refresh (the server rotates the token, so a
+        # retry would burn a second one).
+        d = _http_json(CODEX_TOKEN_URL, {"Content-Type": "application/json"},
+                       data=body, retries=1)
+    except Exception:
+        return None
+    access = d.get("access_token")
+    if not access:
+        return None
+    t = a.setdefault("tokens", {})
+    t["access_token"] = access
+    if d.get("id_token"):
+        t["id_token"] = d["id_token"]
+    if d.get("refresh_token"):          # rotated — must persist the new one
+        t["refresh_token"] = d["refresh_token"]
+    a["last_refresh"] = time.strftime("%Y-%m-%dT%H:%M:%S.000000000Z", time.gmtime())
+    try:
+        _atomic_write_json(auth_file, a)
+    except Exception:
+        pass  # even if persisting fails, the token works for this cycle
+    return access
+
+
+def _codex_usage(tok, auth_file):
+    """Fetch Codex usage; on a 401 (expired token) refresh once and retry."""
+    headers = {
+        "Authorization": f"Bearer {tok}",
+        "User-Agent": "codex_cli_rs/ai-tray",
+        "originator": "codex_cli_rs",
+    }
+    try:
+        return validate_codex_usage(_http_json(CODEX_USAGE_URL, headers))
+    except urllib.error.HTTPError as e:
+        if e.code != 401:
+            raise
+        new = refresh_codex_token(auth_file)
+        if not new:
+            raise
+        headers["Authorization"] = f"Bearer {new}"
+        return validate_codex_usage(_http_json(CODEX_USAGE_URL, headers))
+
+
 def codex_data():
     rows = []
     summary = {"5h": None, "weekly": None}
@@ -309,14 +396,7 @@ def codex_data():
         return {"installed": True, "rows": rows, "summary": summary}
 
     try:
-        u = validate_codex_usage(_http_json(
-            "https://chatgpt.com/backend-api/codex/usage",
-            {
-                "Authorization": f"Bearer {tok}",
-                "User-Agent": "codex_cli_rs/ai-tray",
-                "originator": "codex_cli_rs",
-            },
-        ))
+        u = _codex_usage(tok, auth_file)
     except Exception as e:
         rows.extend(_usage_error_rows(e, "codex login"))
         return {"installed": True, "rows": rows, "summary": summary}
