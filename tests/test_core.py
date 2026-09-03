@@ -212,5 +212,71 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(urlopen.call_count, 1)
 
 
+class CodexRefreshTests(unittest.TestCase):
+    def test_401_refreshes_token_and_retries(self):
+        auth = json.dumps({"tokens": {"access_token": "old", "refresh_token": "rt"}})
+        payload = {"email": "x@y.z", "plan_type": "pro", "rate_limit": {
+            "primary_window": {"used_percent": 10, "limit_window_seconds": 604800}}}
+        usage_calls = {"n": 0}
+
+        def fake_http(url, headers, **kw):
+            if url == core.CODEX_TOKEN_URL:
+                return {"access_token": "new", "refresh_token": "rt2", "id_token": "id2"}
+            if url == core.CODEX_USAGE_URL:
+                usage_calls["n"] += 1
+                if usage_calls["n"] == 1:
+                    raise urllib.error.HTTPError(url, 401, "expired", {}, io.BytesIO())
+                self.assertEqual(headers["Authorization"], "Bearer new")  # retried with fresh token
+                return payload
+            raise AssertionError(f"unexpected url {url}")
+
+        with patch("cli_usage_core.shutil.which", return_value="/usr/bin/codex"), \
+             patch("cli_usage_core.Path.exists", return_value=True), \
+             patch("cli_usage_core.Path.read_text", return_value=auth), \
+             patch("cli_usage_core._atomic_write_json") as write, \
+             patch("cli_usage_core._http_json", side_effect=fake_http):
+            result = core.codex_data()
+
+        self.assertEqual(usage_calls["n"], 2)          # refreshed + retried
+        self.assertEqual(result["summary"]["weekly"], 90.0)
+        self.assertFalse(any("re-login" in r[0] for r in result["rows"]))
+        write.assert_called_once()                      # rotated tokens persisted
+
+    def test_401_without_refresh_token_shows_relogin(self):
+        auth = json.dumps({"tokens": {"access_token": "old"}})  # no refresh_token
+
+        def fake_http(url, headers, **kw):
+            if url == core.CODEX_USAGE_URL:
+                raise urllib.error.HTTPError(url, 401, "expired", {}, io.BytesIO())
+            raise AssertionError(f"unexpected url {url}")
+
+        with patch("cli_usage_core.shutil.which", return_value="/usr/bin/codex"), \
+             patch("cli_usage_core.Path.exists", return_value=True), \
+             patch("cli_usage_core.Path.read_text", return_value=auth), \
+             patch("cli_usage_core._http_json", side_effect=fake_http):
+            result = core.codex_data()
+
+        self.assertTrue(any("re-login required" in r[0] for r in result["rows"]))
+
+    def test_refresh_persists_rotated_refresh_token(self):
+        auth = json.dumps({"tokens": {"access_token": "old", "refresh_token": "rt"},
+                           "auth_mode": "chatgpt"})
+        saved = {}
+
+        def fake_http(url, headers, **kw):
+            self.assertEqual(url, core.CODEX_TOKEN_URL)
+            return {"access_token": "new", "refresh_token": "rotated", "id_token": "id2"}
+
+        with patch("cli_usage_core.Path.read_text", return_value=auth), \
+             patch("cli_usage_core._http_json", side_effect=fake_http), \
+             patch("cli_usage_core._atomic_write_json", side_effect=lambda p, o: saved.update(o)):
+            tok = core.refresh_codex_token(core.Path("/x/auth.json"))
+
+        self.assertEqual(tok, "new")
+        self.assertEqual(saved["tokens"]["refresh_token"], "rotated")  # new RT persisted
+        self.assertEqual(saved["tokens"]["access_token"], "new")
+        self.assertEqual(saved["auth_mode"], "chatgpt")               # other fields preserved
+
+
 if __name__ == "__main__":
     unittest.main()
