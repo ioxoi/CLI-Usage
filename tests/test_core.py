@@ -371,6 +371,57 @@ class ClaudeRefreshTests(unittest.TestCase):
         self.assertTrue(any("re-login required" in r[0] for r in result["rows"]))
 
 
+class ConcurrentCredentialWriteTests(unittest.TestCase):
+    """The owning CLI may rewrite its credential file while we refresh. Our
+    write must merge into the CURRENT file, never clobber it with a stale copy."""
+
+    def test_codex_refresh_preserves_fields_written_by_cli_meanwhile(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            auth = core.Path(tmp) / "auth.json"
+            auth.write_text(json.dumps({"tokens": {"access_token": "old", "refresh_token": "rt"},
+                                        "auth_mode": "chatgpt"}))
+
+            def fake_http(url, headers, **kw):
+                # Simulate the Codex CLI rewriting the file *during* our refresh,
+                # adding a key we know nothing about.
+                cur = json.loads(auth.read_text())
+                cur["cli_added_meanwhile"] = True
+                auth.write_text(json.dumps(cur))
+                return {"access_token": "new", "refresh_token": "rt2"}
+
+            with patch("cli_usage_core._http_json", side_effect=fake_http):
+                self.assertEqual(core.refresh_codex_token(auth), "new")
+
+            final = json.loads(auth.read_text())
+            self.assertTrue(final.get("cli_added_meanwhile"), "concurrent CLI write was clobbered")
+            self.assertEqual(final["tokens"]["access_token"], "new")
+            self.assertEqual(final["tokens"]["refresh_token"], "rt2")
+            self.assertEqual(final["auth_mode"], "chatgpt")
+
+    def test_claude_refresh_preserves_fields_written_by_cli_meanwhile(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            creds = core.Path(tmp) / ".credentials.json"
+            creds.write_text(json.dumps({"claudeAiOauth": {"accessToken": "old", "refreshToken": "rt",
+                                                           "subscriptionType": "team"}}))
+
+            def fake_http(url, headers, **kw):
+                cur = json.loads(creds.read_text())
+                cur["claudeAiOauth"]["rateLimitTier"] = "written_by_cli"
+                creds.write_text(json.dumps(cur))
+                return {"access_token": "new", "refresh_token": "rt2", "expires_in": 60}
+
+            with patch("cli_usage_core._http_json", side_effect=fake_http):
+                self.assertEqual(core.refresh_claude_token(creds), "new")
+
+            o = json.loads(creds.read_text())["claudeAiOauth"]
+            self.assertEqual(o["rateLimitTier"], "written_by_cli", "concurrent CLI write was clobbered")
+            self.assertEqual(o["accessToken"], "new")
+            self.assertEqual(o["refreshToken"], "rt2")
+            self.assertEqual(o["subscriptionType"], "team")
+
+
 class CodexSubLimitLabelTests(unittest.TestCase):
     def test_sub_limit_windows_labeled_by_duration_not_slot(self):
         # primary_window here is a WEEKLY window (7d) — must not be labeled "5h".

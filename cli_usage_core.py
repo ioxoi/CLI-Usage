@@ -33,6 +33,9 @@ PROVIDERS = {
 PROVIDER_TAGS = {name: tag for name, (tag, _cmd) in PROVIDERS.items()}
 PROVIDER_CMDS = {name: cmd for name, (_tag, cmd) in PROVIDERS.items()}
 
+# systemd user unit name (Linux). Shared by the GTK Quit action and installer.
+SERVICE_NAME = "cli-usage-tray.service"
+
 BAR_WIDTH   = 12
 NET_TIMEOUT = 6
 NET_RETRIES = 3
@@ -186,6 +189,23 @@ def _atomic_write_json(path, obj):
         raise
 
 
+def _merge_write_json(path, mutate):
+    """Re-read `path`, apply `mutate(obj)`, and write it back atomically.
+
+    The CLI that owns the credential file may rewrite it while we are
+    refreshing (it refreshes its own token too). Re-reading right before the
+    write and mutating only our fields means we never clobber a newer token or
+    unrelated keys the CLI just saved — a blind write of our stale copy could
+    strand a rotated refresh token and force a manual re-login.
+    """
+    try:
+        current = json.loads(path.read_text())
+    except Exception:
+        current = {}
+    mutate(current)
+    _atomic_write_json(path, current)
+
+
 def _refresh_oauth(token_url, client_id, refresh_token, scope=None, user_agent="cli-usage"):
     """POST a refresh_token grant; return the token response dict or None.
 
@@ -318,14 +338,17 @@ def refresh_claude_token(creds_file):
     if not d:
         return None
     access = d["access_token"]
-    o["accessToken"] = access
-    if d.get("refresh_token"):          # rotated — persist the new one
-        o["refreshToken"] = d["refresh_token"]
-    if d.get("expires_in"):
-        o["expiresAt"] = int((time.time() + float(d["expires_in"])) * 1000)
-    c["claudeAiOauth"] = o
+
+    def apply(current):
+        o = current.setdefault("claudeAiOauth", {})
+        o["accessToken"] = access
+        if d.get("refresh_token"):      # rotated — persist the new one
+            o["refreshToken"] = d["refresh_token"]
+        if d.get("expires_in"):
+            o["expiresAt"] = int((time.time() + float(d["expires_in"])) * 1000)
+
     try:
-        _atomic_write_json(creds_file, c)
+        _merge_write_json(creds_file, apply)
     except Exception:
         pass  # the token still works for this cycle
     return access
@@ -446,15 +469,18 @@ def refresh_codex_token(auth_file):
     if not d:
         return None
     access = d["access_token"]
-    t = a.setdefault("tokens", {})
-    t["access_token"] = access
-    if d.get("id_token"):
-        t["id_token"] = d["id_token"]
-    if d.get("refresh_token"):          # rotated — must persist the new one
-        t["refresh_token"] = d["refresh_token"]
-    a["last_refresh"] = time.strftime("%Y-%m-%dT%H:%M:%S.000000000Z", time.gmtime())
+
+    def apply(current):
+        t = current.setdefault("tokens", {})
+        t["access_token"] = access
+        if d.get("id_token"):
+            t["id_token"] = d["id_token"]
+        if d.get("refresh_token"):      # rotated — must persist the new one
+            t["refresh_token"] = d["refresh_token"]
+        current["last_refresh"] = time.strftime("%Y-%m-%dT%H:%M:%S.000000000Z", time.gmtime())
+
     try:
-        _atomic_write_json(auth_file, a)
+        _merge_write_json(auth_file, apply)
     except Exception:
         pass  # even if persisting fails, the token works for this cycle
     return access

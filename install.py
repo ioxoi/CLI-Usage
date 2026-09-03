@@ -18,6 +18,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from cli_usage_core import SERVICE_NAME
+
 APP_NAME = "cli-usage"
 ROOT = Path(__file__).resolve().parent
 REQS = ROOT / "requirements.txt"
@@ -175,9 +177,6 @@ X-GNOME-Autostart-enabled=true
         old.unlink(missing_ok=True)
         desktop.write_text(content)
     return desktop
-
-
-SERVICE_NAME = "cli-usage-tray.service"
 
 
 def install_linux_systemd(script: Path, python_bin: Path, *, dry_run: bool) -> Path:

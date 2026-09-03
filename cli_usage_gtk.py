@@ -27,7 +27,8 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-from cli_usage_core import PROVIDERS as CORE_PROVIDERS, fetch_all, summary_badge, summary_worst, usage_state
+from cli_usage_core import (PROVIDERS as CORE_PROVIDERS, SERVICE_NAME, fetch_all,
+                            summary_badge, summary_worst, usage_state)
 
 
 def sd_notify(state):
@@ -246,14 +247,17 @@ class AITray:
         self.do_refresh()
 
     def _quit(self):
-        # A manual Quit should STAY quit. Under systemd, stop the unit so it is
-        # not treated as a crash and restarted; the launcher (or next login)
-        # brings it back. Outside systemd, just exit the main loop.
+        # A manual Quit should STAY quit. Under systemd, ask systemd to stop the
+        # unit and let IT terminate us: the unit then ends in a clean "inactive"
+        # state and Restart=on-failure never fires. (Exiting ourselves first
+        # would also avoid a restart — exit 0 isn't a failure — but leaves a
+        # stop racing a dead process.) Outside systemd, just exit the loop.
         if os.environ.get("INVOCATION_ID"):
             try:
-                subprocess.Popen(["systemctl", "--user", "stop", "cli-usage-tray.service"])
+                subprocess.Popen(["systemctl", "--user", "stop", SERVICE_NAME])
+                return
             except Exception:
-                pass
+                pass  # fall through and exit directly
         Gtk.main_quit()
 
 
